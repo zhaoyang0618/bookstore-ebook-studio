@@ -97,7 +97,22 @@ jobs:
           Write-Host "符号链接验证通过"
 
       - name: 构建 Windows（Release）
-        run: flutter build windows --release
+        shell: pwsh
+        run: |
+          flutter build windows --release 2>&1 | Tee-Object -FilePath build-windows.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "=== 构建失败，尾部日志 ==="
+            Get-Content build-windows.log -Tail 100
+            exit $LASTEXITCODE
+          }
+
+      - name: 上传构建日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-log
+          path: build-windows.log
+          retention-days: 7
       - name: 打包 zip
         shell: pwsh
         run: |
