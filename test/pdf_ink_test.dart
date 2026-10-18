@@ -43,6 +43,70 @@ Uint8List buildClassicPdf() {
   return buffer.toBytes();
 }
 
+
+/// 构造一个**现代格式** PDF：xref 流 + 对象流（PDF 1.5+）。
+///
+/// 为什么要在测试里生成它：真实样本 `2.pdf` 无法提交进仓库，
+/// 而「xref 流 + 对象流」恰恰是本实现最容易出错、也最必须覆盖的路径
+///（页面对象被压缩，必须解对象流才能拿到页面树）。
+/// 有了它，CI 也能真正验证这条路径，而不是只在本地偶然跑过。
+Uint8List buildModernPdf() {
+  // 对象 1 = Catalog，2 = Pages，3 = Page —— 全部塞进对象流
+  final inner = <String>[
+    '<</Type/Catalog/Pages 2 0 R>>',
+    '<</Type/Pages/Count 1/Kids[3 0 R]/MediaBox[0 0 300 500]>>',
+    '<</Type/Page/Parent 2 0 R>>',
+  ];
+
+  // 对象流头部：N 组「对象号 相对偏移」（裸数字，无方括号）
+  final header = StringBuffer();
+  final offsets = <int>[];
+  var cursor = 0;
+  for (var i = 0; i < inner.length; i++) {
+    offsets.add(cursor);
+    header.write('${i + 1} $cursor ');
+    cursor += inner[i].length + 1;
+  }
+  final headerText = header.toString();
+  final body = inner.map((s) => '$s ').join();
+  final objStmContent = '$headerText$body';
+
+  final out = BytesBuilder();
+  out.add('%PDF-1.5\n'.codeUnits);
+
+  // 对象 5 = 对象流
+  final objStmOffset = out.length;
+  final compressed = Uint8List.fromList(ZLibEncoder().convert(objStmContent.codeUnits));
+  out.add('5 0 obj\n<</Type/ObjStm/N ${inner.length}/First ${headerText.length}'
+      '/Filter/FlateDecode/Length ${compressed.length}>>\nstream\n'.codeUnits);
+  out.add(compressed);
+  out.add('\nendstream\nendobj\n'.codeUnits);
+
+  // 对象 4 = xref 流；条目 0..5，W = [1 4 2]
+  final xrefOffset = out.length;
+  final entries = BytesBuilder();
+  void entry(int type, int f1, int f2) {
+    entries.addByte(type);
+    entries.add([(f1 >> 24) & 0xFF, (f1 >> 16) & 0xFF, (f1 >> 8) & 0xFF, f1 & 0xFF]);
+    entries.add([(f2 >> 8) & 0xFF, f2 & 0xFF]);
+  }
+
+  entry(0, 0, 65535); // 0：空闲
+  for (var i = 0; i < inner.length; i++) {
+    entry(2, 5, i); // 1..3：压缩在对象流 5 里
+  }
+  entry(1, xrefOffset, 0); // 4：xref 流自身
+  entry(1, objStmOffset, 0); // 5：对象流
+
+  final xrefData = Uint8List.fromList(ZLibEncoder().convert(entries.toBytes()));
+  out.add('4 0 obj\n<</Type/XRef/Size 6/W[1 4 2]/Root 1 0 R'
+      '/Filter/FlateDecode/Length ${xrefData.length}>>\nstream\n'.codeUnits);
+  out.add(xrefData);
+  out.add('\nendstream\nendobj\n'.codeUnits);
+  out.add('startxref\n$xrefOffset\n%%EOF\n'.codeUnits);
+  return out.toBytes();
+}
+
 InkStroke strokeAt(List<Offset> points, {double width = 2}) => InkStroke(
       color: const Color(0xFFE53935),
       width: width,
@@ -138,7 +202,70 @@ void main() {
     });
   });
 
-  group('PDF 读取（真实文件：xref 流 + 对象流）', () {
+
+  group('PDF 读取（xref 流 + 对象流，CI 可覆盖）', () {
+    late Uint8List data;
+    setUp(() => data = buildModernPdf());
+
+    test('能解析 xref 流', () {
+      final reader = PdfFileReader.fromBytes(data);
+      expect(reader.root.number, 1);
+      expect(reader.size, 6);
+      // 1..3 是压缩对象
+      expect(reader.entries[1]!.type, 2);
+      expect(reader.entries[5]!.type, 1);
+    });
+
+    test('能从对象流里取出被压缩的对象', () {
+      final reader = PdfFileReader.fromBytes(data);
+      final catalog = reader.resolve(reader.root) as PdfDict;
+      expect((catalog['Type'] as PdfName).name, 'Catalog');
+      expect(reader.dictGet(reader.root, 'Pages'), isA<PdfDict>());
+    });
+
+    test('能沿对象流里的页面树收集页面', () {
+      final reader = PdfFileReader.fromBytes(data);
+      final pages = reader.collectPages();
+      expect(pages.length, 1);
+      expect(pages.first.number, 3);
+      // MediaBox 在 Pages 节点上，需继承
+      final page = reader.resolve(pages.first) as PdfDict;
+      expect(reader.pageGeometry(page).mediaBox, [0, 0, 300, 500]);
+    });
+
+    test('现代格式也能写入原生 Ink 注释', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_modern');
+      final src = File('${dir.path}/modern.pdf')..writeAsBytesSync(data);
+      final out = '${dir.path}/modern-out.pdf';
+
+      final result = exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'ink-modern',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(50, 60), const Offset(150, 110)])],
+          ),
+        ],
+      );
+      expect(result.annotationCount, 1);
+
+      final reader = PdfFileReader.fromBytes(File(out).readAsBytesSync());
+      expect(reader.collectPages().length, 1);
+      final page = reader.resolve(reader.collectPages().first) as PdfDict;
+      final annots = reader.dictGet(page, 'Annots') as PdfArray;
+      final annot = reader.deref(annots.items.last) as PdfDict;
+      expect((annot['Subtype'] as PdfName).name, 'Ink');
+      // y 翻转：500 - 60 = 440
+      final inkList = annot['InkList'] as PdfArray;
+      final firstStroke = inkList.items.first as PdfArray;
+      expect((firstStroke.items[1] as PdfNumber).value, closeTo(440, 0.01));
+    });
+  });
+
+  group('PDF 读取（真实文件：xref 流 + 对象流，本地样本）', () {
     test('解析 338 页 LaTeX PDF', () {
       final reader = PdfFileReader.fromBytes(File(kRealPdf).readAsBytesSync());
       expect(reader.size, 1935);
@@ -238,7 +365,7 @@ void main() {
 
       // 原文件未被改动
       expect(File(kRealPdf).lengthSync(), 1506800);
-    });
+    }, skip: !hasRealPdf);
 
     test('页码越界时报错而不是写坏文件', () {
       final dir = Directory.systemTemp.createTempSync('pdf_ink_bad');
@@ -365,6 +492,6 @@ void main() {
       expect(reader.collectPages().length, 338);
       // 原工作区样本未被改动
       expect(File(kRealPdf).lengthSync(), 1506800);
-    });
-  }, skip: false);
+    }, skip: !hasRealPdf);
+  });
 }
