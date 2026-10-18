@@ -16,8 +16,12 @@ dependencies:
   # PDF 渲染（设计文档 3.2：PDFium FFI，原生级性能）
   pdfrx: ^1.0.0
 
-  # EPUB 渲染（设计文档 3.2：flutter_epub_viewer）
-  epub_viewer: ^0.2.0
+  # EPUB 渲染：暂未引入依赖，选型待定（详见 README「EPUB 渲染选型」）
+  #   - epub_viewer        : 2022 年停更，android/build.gradle 缺 namespace，
+  #                          AGP 8+ 配置阶段直接失败（已实测）
+  #   - flutter_epub_viewer: 依赖 flutter_inappwebview，平台仅 android/ios/macos/web，
+  #                          不含 Windows/Linux —— 与目标平台冲突
+  #   EpubEngine 目前是占位实现，接入渲染时再定方案
 
   # Markdown（设计文档 3.2：flutter_markdown）
   flutter_markdown: ^0.7.0

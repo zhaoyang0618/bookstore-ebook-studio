@@ -92,10 +92,63 @@ flutter analyze             # 静态检查
 - **录课回看**：iPad 录制的视频，桌面端可播放，元数据正确
 - **图书馆同步**：Mac 上导入新书，iPad 图书馆自动更新（元数据同步）
 
+## 多平台构建（GitHub Actions）
+
+本地只有 Command Line Tools 没有 Xcode，macOS/iOS 构建交给 GitHub Actions。
+`.github/workflows/build.yml` 覆盖五个平台：
+
+| 平台 | Runner | 产物 | 状态 |
+|---|---|---|---|
+| macOS | `macos-14` | `ebook_studio-macos.zip` (25.2 MB) | ✅ |
+| Windows | `windows-2022` | `ebook_studio-windows.zip` (17.1 MB) | ✅ |
+| Linux | `ubuntu-22.04` | `ebook_studio-linux.tar.gz` (23.2 MB) | ✅ |
+| iOS | `macos-14` | 未签名 `.app`（真机需自签） | ✅ |
+| Android | `ubuntu-latest` | `app-release.apk` | ✅ |
+
+产物在 Actions 运行的 Artifacts 区下载，保留 14 天。
+
+### 踩过的两个 CI 坑
+
+**1. Windows 必须用 `windows-2022`，不能用 `windows-latest`**
+
+失败信息：
+```
+CMake Error at CMakeLists.txt:3 (project):
+  Generator Visual Studio 16 2019 could not find any instance of Visual Studio.
+```
+
+原因：Flutter 3.35.5 的 `visual_studio.dart` 生成器映射只有
+`17 => 'Visual Studio 17 2022'`，其余落到默认 `'Visual Studio 16 2019'`。
+`windows-latest` 已升级到 **Visual Studio 18**，映射不到 17 → 请求 VS 2019 → 失败。
+
+**2. `epub_viewer` 会让 Android 构建失败**
+
+失败信息：
+```
+A problem occurred configuring project ':epub_viewer'.
+> Namespace not specified. Specify a namespace in the module's build file:
+  .../epub_viewer-0.2.5/android/build.gradle
+```
+
+该插件 2022 年起停止维护（SDK 约束还是 `<3.0.0`），缺少 AGP 8+ 必需的
+`namespace` 声明，Gradle 配置阶段直接失败。
+
+### EPUB 渲染选型（待定）
+
+两个候选都有硬伤，因此暂未引入依赖，`EpubEngine` 保持占位实现：
+
+| 候选 | 问题 |
+|---|---|
+| `epub_viewer` | 2022 年停更；缺 `namespace`，Android 构建失败（已实测） |
+| `flutter_epub_viewer` | 依赖 `flutter_inappwebview`；平台仅 android/ios/macos/web，**不含 Windows/Linux** |
+
+而设计文档要求 Flutter 版覆盖 macOS / Windows / iPad / Android。
+后续可考虑与 dsh 版一致的方案：WebView + foliate-js，这样两端渲染逻辑也能统一。
+
 ## 已验证（真实 Flutter 3.35.5 / Dart 3.9.2 环境）
 
 ```
-flutter analyze   → 0 error / 0 warning（仅 7 条 prefer_const_constructors info）
+flutter analyze   → No issues found!
 flutter test      → 50 个测试全部通过
 ```
 
