@@ -112,15 +112,19 @@ Release 资产**公开可下载**（Actions 的 artifact 反而需要登录）�
 
 **<https://github.com/zhaoyang0618/bookstore-ebook-studio/releases>**
 
-最新 `v0.2.0`：
+下载地址用 `releases/latest/download/<文件名>` 形式，
+**永远指向最新版本**，不必随发版改文档：
 
-| 文件 | 大小 | 链接 |
-|---|---|---|
-| macOS (arm64) | 27.0 MB | [ebook_studio-macos.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-macos.zip) |
-| Windows | 17.8 MB | [ebook_studio-windows.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-windows.zip) |
-| Linux | 23.4 MB | [ebook_studio-linux.tar.gz](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-linux.tar.gz) |
-| Android | 67.9 MB | [app-release.apk](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/app-release.apk) |
-| iOS（未签名） | 12.4 MB | [ebook_studio-ios-unsigned.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-ios-unsigned.zip) |
+| 文件 | 链接 |
+|---|---|
+| macOS (arm64) | [ebook_studio-macos.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/latest/download/ebook_studio-macos.zip) |
+| Windows | [ebook_studio-windows.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/latest/download/ebook_studio-windows.zip) |
+| Linux | [ebook_studio-linux.tar.gz](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/latest/download/ebook_studio-linux.tar.gz) |
+| Android | [app-release.apk](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/latest/download/app-release.apk) |
+| iOS（未签名） | [ebook_studio-ios-unsigned.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/latest/download/ebook_studio-ios-unsigned.zip) |
+
+> 需要固定版本时，把 `latest` 换成具体 tag，例如
+> `/releases/download/v0.5.1/ebook_studio-macos.zip`。
 
 #### 运行未签名的 macOS 应用
 
