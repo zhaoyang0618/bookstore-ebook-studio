@@ -25,7 +25,7 @@ Uint8List buildClassicPdf() {
     '3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 400]>>\nendobj\n',
   ];
   final buffer = BytesBuilder();
-  buffer.add('PDF-1.4\n'.codeUnits);
+  buffer.add('%PDF-1.4\n'.codeUnits);
   final offsets = <int>[0];
   for (final obj in objects) {
     offsets.add(buffer.length);
@@ -677,5 +677,58 @@ void main() {
       final content = String.fromCharCodes(form.raw);
       expect(content, contains('/GS0 gs'));
     });
+  });
+
+  group('xref 表必须从对象 0 开始（PDFKit 兼容性）', () {
+    test('生成的 xref 表首个子段是 0 1 + 空闲条目', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_xref0');
+      final src = File('${dir.path}/in.pdf')..writeAsBytesSync(buildClassicPdf());
+      final out = '${dir.path}/out.pdf';
+      exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'x',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(10, 10), const Offset(50, 50)])],
+          ),
+        ],
+      );
+
+      final data = File(out).readAsBytesSync();
+      final xrefStart = findLastStartXref(data);
+      final table = String.fromCharCodes(data.sublist(xrefStart, xrefStart + 60));
+      expect(table, startsWith('xref\n0 1\n0000000000 65535 f '),
+          reason: 'PDF 32000-1 7.5.4：表中第一条目（对象 0）应始终为空闲；'
+              '缺少它时 pypdf 会整体偏移对象号，macOS 预览会直接拒绝打开');
+
+      // 真实 PDF（xref 流 + 对象流）也必须如此
+    }, skip: !hasRealPdf);
+
+    test('真实 PDF 生成的结果首个子段也是 0 1', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_xref0_real');
+      final out = '${dir.path}/out.pdf';
+      exportInkAnnotations(
+        sourcePath: kRealPdf,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'x',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(10, 10), const Offset(50, 50)])],
+          ),
+        ],
+      );
+      final data = File(out).readAsBytesSync();
+      final xrefStart = findLastStartXref(data);
+      final table = String.fromCharCodes(data.sublist(xrefStart, xrefStart + 40));
+      expect(table, startsWith('xref\n0 1\n'));
+      // 且原有交叉引用仍可通过 /Prev 链回到
+      final trailer = String.fromCharCodes(data.sublist(data.length - 300));
+      expect(trailer, contains('/Prev'));
+    }, skip: !hasRealPdf);
   });
 }

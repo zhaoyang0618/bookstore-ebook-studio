@@ -34,6 +34,12 @@ class PdfFileReader {
 
   /// 解析整个文件。
   factory PdfFileReader.fromBytes(Uint8List data) {
+    // 头部校验：不是 PDF 时给出明确原因，而不是让后续解析产生
+    // 一堆看不懂的偏移错误。
+    if (data.length < 8 || data[0] != 0x25 || data[1] != 0x50 ||
+        data[2] != 0x44 || data[3] != 0x46) {
+      throw PdfSyntaxException('不是 PDF 文件（缺少 %PDF- 文件头）');
+    }
     final startXref = findLastStartXref(data);
     final entries = <int, XrefEntry>{};
     final trailer = <String, PdfObject>{};
@@ -590,9 +596,21 @@ class PdfIncrementalWriter {
     final startXref = _currentLength;
 
     // 经典 xref 表：条目必须按对象号升序，每条固定 20 字节。
-    final numbers = _updatedOffsets.keys.toList()..sort();
+    final numbers = _updatedOffsets.keys.where((n) => n > 0).toList()..sort();
     final out = StringBuffer();
     out.write('xref\n');
+
+    // 关键：第一个子段必须是对象 0 的空闲条目。
+    //
+    // PDF 32000-1 7.5.4 规定「表中的第一条目（对象号 0）应始终为空闲」。
+    // 缺少它时阅读器的处理方式不一致：
+    //   - pypdf 会把**所有对象号整体偏移**第一个子段的起始值（源码里的
+    //     xref_index），导致错位并发出 "not zero-indexed" 警告
+    //   - macOS 预览（PDFKit）更严格，直接拒绝打开文件
+    //   - qpdf / Ghostscript 较宽容，看不出问题
+    // 因此这里始终先写 `0 1` + 空闲条目。
+    out.write('0 1\n');
+    out.write('0000000000 65535 f \n');
     // 分段输出（连续的对象号合并成一段）
     var i = 0;
     while (i < numbers.length) {
