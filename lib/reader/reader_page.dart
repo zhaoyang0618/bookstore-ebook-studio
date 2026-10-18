@@ -12,6 +12,7 @@ import 'package:pdfrx/pdfrx.dart';
 import '../engines/book_engine.dart';
 import '../engines/epub_webview.dart';
 import '../features/annotation/ink_canvas.dart';
+import '../features/annotation/pdf_ink.dart';
 import '../features/annotation/annotation_panel.dart';
 import '../library/library_page.dart';
 import '../models/mylibrary_models.dart';
@@ -35,10 +36,85 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   BookEngine? _engine;
   bool _inkMode = false;
 
+  /// PDF 墨迹层：负责坐标映射与按页存取（见 features/annotation/pdf_ink.dart）。
+  final PdfInkController _ink = PdfInkController();
+
+  /// 当前批注列表的镜像，避免在回调里读到过期的 provider 值。
+  List<Annotation> _annotations = const [];
+
   @override
   void dispose() {
+    _ink.dispose();
     _engine?.dispose();
     super.dispose();
+  }
+
+  /// 把批注里的墨迹按页灌入墨迹层，供 pdfrx 绘制回页面。
+  void _loadInkFromAnnotations(List<Annotation> annotations) {
+    _ink.clear();
+    final byPage = <int, List<InkStroke>>{};
+    for (final annotation in annotations) {
+      if (annotation.type != 'ink' || annotation.strokes == null) continue;
+      // 锚点页码按 1 起始存（设计文档 1.5 的 InkAnchor.page 是人类可读页码）
+      final page = (annotation.anchor['page'] as num?)?.toInt();
+      if (page == null) continue;
+      final strokes = byPage.putIfAbsent(page, () => <InkStroke>[]);
+      for (final raw in annotation.strokes!) {
+        strokes.add(InkStroke.fromJson(raw));
+      }
+    }
+    byPage.forEach(_ink.setPageStrokes);
+  }
+
+  /// 把一笔屏幕坐标笔迹转成页面坐标并落盘。
+  void _commitInkStroke(InkStroke screenStroke) {
+    if (screenStroke.points.isEmpty) return;
+    final first = screenStroke.points.first;
+    // 找落点所在的页；落在页边距上则忽略
+    final hit = hitTestPage(_ink.hits, Offset(first.x, first.y));
+    if (hit == null) return;
+
+    final points = <InkPoint>[];
+    for (final point in screenStroke.points) {
+      final page = screenToPage(Offset(point.x, point.y), hit.rect, hit.size);
+      points.add(InkPoint(x: page.dx, y: page.dy, pressure: point.pressure, t: point.t));
+    }
+    final pageStroke = InkStroke(
+      color: screenStroke.color,
+      width: screenStroke.width,
+      points: points,
+    );
+    _ink.addPageStroke(hit.pageNumber, pageStroke);
+
+    final now = DateTime.now().toUtc().toIso8601String();
+    final annotation = Annotation(
+      id: 'ink-${DateTime.now().millisecondsSinceEpoch}',
+      type: 'ink',
+      // 锚点页码 1 起始（与 pdfrx 的 pageNumber 一致）
+      anchor: {'type': 'ink', 'page': hit.pageNumber},
+      strokes: [pageStroke.toJson()],
+      createdAt: now,
+      updatedAt: now,
+    );
+    _annotations = [..._annotations, annotation];
+    ref.read(annotationsProvider.notifier).state = _annotations;
+    // 手写内容「画完就不能丢」，立即落盘
+    unawaited(_persistAnnotations());
+    if (mounted) setState(() {});
+  }
+
+  /// 持久化当前批注列表。
+  Future<void> _persistAnnotations() async {
+    final engine = _engine;
+    if (engine == null) return;
+    try {
+      await engine.saveAnnotations(_annotations);
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('批注保存失败：${error.message}')));
+      }
+    }
   }
 
   /// 打开一本书。`root` 为 null 表示「独立文件」模式（不经 MyLibrary）。
@@ -51,6 +127,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       await engine.open(filePath);
       final annotations = await engine.loadAnnotations();
       ref.read(annotationsProvider.notifier).state = annotations;
+      _annotations = annotations;
+      // 墨迹按页恢复（PDF 场景）
+      _loadInkFromAnnotations(annotations);
 
       // EPUB 走 foliate：续读位置通过 CFI 传给 WebView
       if (engine is EpubEngine) {
@@ -142,11 +221,25 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       appBar: AppBar(
         title: Text('${book.title} · ${book.author}'),
         actions: [
-          IconButton(
-            tooltip: _inkMode ? '退出手写' : '手写标注',
-            icon: Icon(_inkMode ? Icons.edit_off : Icons.edit),
-            onPressed: () => setState(() => _inkMode = !_inkMode),
-          ),
+          // 手写标注目前只支持 PDF：墨迹锚点是页面坐标（InkAnchor.page），
+          // 其它格式没有页面概念，硬画会无处安放。禁用并说明原因，
+          // 好过让用户画了半天发现没反应。
+          if (_engine is PdfEngine)
+            IconButton(
+              tooltip: _inkMode ? '退出手写' : '手写标注（PDF）',
+              icon: Icon(_inkMode ? Icons.edit_off : Icons.edit),
+              onPressed: () => setState(() => _inkMode = !_inkMode),
+            )
+          else
+            IconButton(
+              tooltip: '手写标注目前仅支持 PDF',
+              icon: const Icon(Icons.edit_off),
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('手写标注目前仅支持 PDF —— 墨迹需要页面坐标来锚定')),
+                );
+              },
+            ),
           IconButton(
             tooltip: '批注列表',
             icon: const Icon(Icons.sticky_note_2_outlined),
@@ -166,23 +259,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                     engine: _engine,
                     book: book,
                     onOpen: () => _open(book, effectiveRoot),
+                    ink: _ink,
                   ),
                 ),
                 // 手写标注层（设计文档 3.3：矢量笔迹）
                 if (_inkMode)
                   Positioned.fill(
                     child: InkCanvas(
-                      onStrokeEnd: (stroke) {
-                        final annotation = Annotation(
-                          id: 'ink-${DateTime.now().millisecondsSinceEpoch}',
-                          type: 'ink',
-                          anchor: {'type': 'ink', 'page': _engine?.currentIndex ?? 0},
-                          strokes: [stroke.toJson()],
-                          createdAt: DateTime.now().toUtc().toIso8601String(),
-                          updatedAt: DateTime.now().toUtc().toIso8601String(),
-                        );
-                        ref.read(annotationsProvider.notifier).state = [...annotations, annotation];
-                      },
+                      onStrokeEnd: (screenStroke) => _commitInkStroke(screenStroke),
                     ),
                   ),
               ],
@@ -261,11 +345,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
 
 /// 引擎视图：根据格式分派到具体渲染组件。
 class _EngineView extends StatefulWidget {
-  const _EngineView({required this.engine, required this.book, required this.onOpen});
+  const _EngineView({
+    required this.engine,
+    required this.book,
+    required this.onOpen,
+    required this.ink,
+  });
 
   final BookEngine? engine;
   final Book book;
   final VoidCallback onOpen;
+
+  /// PDF 墨迹层（其它格式用不到，但统一透传保持签名一致）。
+  final PdfInkController ink;
 
   @override
   State<_EngineView> createState() => _EngineViewState();
@@ -297,6 +389,7 @@ class _EngineViewState extends State<_EngineView> {
     if (engine is PdfEngine) {
       return _PdfSurface(
         engine: engine,
+        ink: widget.ink,
         // 页码/页数变化要刷新父级的底栏和进度，不能只 setState 自己
         onChanged: () {
           if (mounted) setState(() {});
@@ -333,9 +426,17 @@ class _EngineViewState extends State<_EngineView> {
 
 /// PDF 渲染面：pdfrx 的 PdfViewer，页码变化回写到引擎。
 class _PdfSurface extends StatefulWidget {
-  const _PdfSurface({required this.engine, required this.onChanged});
+  const _PdfSurface({
+    required this.engine,
+    required this.ink,
+    required this.onChanged,
+  });
 
   final PdfEngine engine;
+
+  /// 墨迹层：既用于绘制已落定的笔迹，也用于提供页面屏幕矩形。
+  final PdfInkController ink;
+
   final VoidCallback onChanged;
 
   @override
@@ -343,6 +444,10 @@ class _PdfSurface extends StatefulWidget {
 }
 
 class _PdfSurfaceState extends State<_PdfSurface> {
+  /// 回调列表保持同一实例：`PdfViewerParams` 用 == 比较，
+  /// 每次 build 新建 list 会被判定为参数变化，导致 viewer 反复更新。
+  late final List<PdfViewerPagePaintCallback> _paintCallbacks = [widget.ink.paintPage];
+
   @override
   Widget build(BuildContext context) {
     final engine = widget.engine;
@@ -357,6 +462,10 @@ class _PdfSurfaceState extends State<_PdfSurface> {
       params: PdfViewerParams(
         margin: 8,
         backgroundColor: const Color(0xFFF7F6F3),
+        // 关键：pdfrx 为每页调用这个回调，并给出该页当前的屏幕矩形。
+        // 我们借它 (1) 记录页面矩形供墨迹坐标换算 (2) 把该页墨迹画到页面上。
+        // 由 pdfrx 负责缩放/平移，笔迹因此天然随页面移动。
+        pagePaintCallbacks: _paintCallbacks,
         // 文档加载完成：回填真实页数
         onDocumentChanged: (document) {
           if (document == null) return;

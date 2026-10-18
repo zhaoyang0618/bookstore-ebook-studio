@@ -79,8 +79,16 @@ abstract class BookEngine {
   /// 加载批注（非 PDF 从边车文件读，PDF 从文件本身读）。
   Future<List<Annotation>> loadAnnotations();
 
-  /// 保存批注（PDF 写回文件本身，其它写边车）。
-  Future<void> saveAnnotations();
+  /// 保存批注。
+  ///
+  /// [annotations] 是当前这本书的全部批注。
+  /// 边车文件路径由 [notesPath] 决定。
+  Future<void> saveAnnotations(List<Annotation> annotations);
+
+  /// 批注边车文件路径。
+  ///
+  /// 设计文档 1.5：`books/{title}/{title}.notes.json`。
+  String get notesPath;
 
   /// 翻页。
   Future<void> nextPage();
@@ -245,8 +253,11 @@ class EpubEngine extends BaseBookEngine {
   Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
 
   @override
-  Future<void> saveAnnotations() async {
-    // 批注写回边车文件（设计文档 3.3）
+  String get notesPath => notesPathFor(_filePath);
+
+  @override
+  Future<void> saveAnnotations(List<Annotation> annotations) async {
+    await writeSidecarAnnotations(notesPath, annotations);
   }
 
   @override
@@ -393,12 +404,21 @@ class PdfEngine extends BaseBookEngine {
   }
 
   @override
-  Future<void> saveAnnotations() async {
-    // 通过 FFI 调用 PDFium 原生注释 API，把注释序列化回 PDF 文件。
-    // 笔迹以**矢量数据**存储（点 + 压力 + 时间戳），而非截图（设计文档 3.3）。
+  String get notesPath => notesPathFor(_filePath);
+
+  @override
+  Future<void> saveAnnotations(List<Annotation> annotations) async {
+    // 阶段性实现：先写边车文件，保证「画完不丢、重开还在」。
     //
-    // 写入逻辑已在 mylibrary-core 的 pdf-writer 模块实现并通过真实 PDF 验证，
-    // Flutter 侧接入需要走 Platform Channel 或 FFI，属后续工作。
+    // 设计文档 3.3 要求 PDF 批注以**原生注释对象**写回 PDF 本身
+    //（`/Ink` + `/InkList`），这样 dsh 版（PDF.js）能直接看到墨迹。
+    // 那份写入逻辑已在 mylibrary-core 的 pdf-writer 模块实现，
+    // 并在真实 338 页 / 507 页 PDF 上验证过；Flutter 侧接入需要
+    // Platform Channel 或 FFI 桥，属下一步工作。
+    //
+    // 边车与原生注释的关系：边车是 App 的工作副本（含 id / 时间戳等
+    // PDF 注释放不下的元数据），第 4 步会把同一份墨迹额外写进 PDF。
+    await writeSidecarAnnotations(notesPath, annotations);
   }
 
   @override
@@ -451,8 +471,11 @@ class MarkdownEngine extends BaseBookEngine {
   Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
 
   @override
-  Future<void> saveAnnotations() async {
-    // 批注写回边车文件
+  String get notesPath => notesPathFor(_filePath);
+
+  @override
+  Future<void> saveAnnotations(List<Annotation> annotations) async {
+    await writeSidecarAnnotations(notesPath, annotations);
   }
 
   @override
@@ -512,8 +535,11 @@ class TxtEngine extends BaseBookEngine {
   Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
 
   @override
-  Future<void> saveAnnotations() async {
-    // 批注写回边车文件
+  String get notesPath => notesPathFor(_filePath);
+
+  @override
+  Future<void> saveAnnotations(List<Annotation> annotations) async {
+    await writeSidecarAnnotations(notesPath, annotations);
   }
 
   @override

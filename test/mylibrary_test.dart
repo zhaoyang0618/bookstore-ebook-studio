@@ -14,6 +14,9 @@ import 'package:ebook_studio/storage/my_library_store.dart';
 import 'package:ebook_studio/storage/remote_provider.dart';
 import 'package:ebook_studio/storage/sync.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ebook_studio/features/annotation/ink_canvas.dart';
+import 'package:ebook_studio/features/annotation/pdf_ink.dart';
+import 'package:flutter/material.dart';
 
 /// 临时目录里的一个 MyLibrary。
 Library makeLibrary({
@@ -581,6 +584,113 @@ void main() {
       final engine = PdfEngine();
       engine.setPageCount(0);
       expect(engine.getCurrentPosition().percentage, 0.0);
+    });
+  });
+
+  group('墨迹坐标映射（设计文档 3.3）', () {
+    // 页面：595x842 点（A4），在屏幕上被缩放到 300x424（约 0.5 倍）
+    const pageSize = Size(595, 842);
+    const pageRect = Rect.fromLTWH(100, 50, 300, 424);
+
+    test('屏幕坐标 → 页面坐标', () {
+      // 页面左上角
+      expect(screenToPage(const Offset(100, 50), pageRect, pageSize), const Offset(0, 0));
+      // 页面中心 → 页面中心
+      final center = screenToPage(const Offset(250, 262), pageRect, pageSize);
+      expect(center.dx, closeTo(297.5, 0.01));
+      expect(center.dy, closeTo(421, 0.01));
+      // 页面右下角
+      final bottomRight = screenToPage(const Offset(400, 474), pageRect, pageSize);
+      expect(bottomRight.dx, closeTo(595, 0.01));
+      expect(bottomRight.dy, closeTo(842, 0.01));
+    });
+
+    test('页面坐标 → 屏幕坐标（往返一致）', () {
+      const original = Offset(123.4, 567.8);
+      final screen = pageToScreen(original, pageRect, pageSize);
+      final back = screenToPage(screen, pageRect, pageSize);
+      expect(back.dx, closeTo(original.dx, 0.001));
+      expect(back.dy, closeTo(original.dy, 0.001));
+    });
+
+    test('窗口尺寸变化后位置按比例保持', () {
+      // 同一页面坐标，在放大一倍的屏幕上应落在放大一倍的位置
+      const pagePoint = Offset(297.5, 421); // 页面中心
+      final small = pageToScreen(pagePoint, pageRect, pageSize);
+      const biggerRect = Rect.fromLTWH(0, 0, 600, 848);
+      final big = pageToScreen(pagePoint, biggerRect, pageSize);
+      // 两者都应落在各自页面的中心
+      expect((small.dx - pageRect.left) / pageRect.width, closeTo(0.5, 0.001));
+      expect((big.dx - biggerRect.left) / biggerRect.width, closeTo(0.5, 0.001));
+    });
+
+    test('退化的页面矩形不产生 NaN / 除零', () {
+      const zero = Rect.fromLTWH(0, 0, 0, 0);
+      final point = screenToPage(const Offset(10, 10), zero, pageSize);
+      expect(point.dx.isFinite, isTrue);
+      expect(point.dy.isFinite, isTrue);
+    });
+
+    test('命中测试：落在页内返回该页，页外返回 null', () {
+      const pages = [
+        PdfPageHit(pageNumber: 1, rect: Rect.fromLTWH(0, 0, 300, 424), size: pageSize),
+        PdfPageHit(pageNumber: 2, rect: Rect.fromLTWH(0, 424, 300, 424), size: pageSize),
+      ];
+      expect(hitTestPage(pages, const Offset(150, 200))?.pageNumber, 1);
+      expect(hitTestPage(pages, const Offset(150, 600))?.pageNumber, 2);
+      // 页边距区域
+      expect(hitTestPage(pages, const Offset(-10, 200)), isNull);
+    });
+  });
+
+  group('墨迹持久化（设计文档 1.5 契约）', () {
+    test('InkStroke 与边车 JSON 往返一致', () {
+      final stroke = InkStroke(
+        color: const Color(0xFFE53935),
+        width: 3,
+        points: [
+          InkPoint(x: 10, y: 20, pressure: 0.5, t: 0),
+          InkPoint(x: 30, y: 40, pressure: 0.8, t: 16),
+        ],
+      );
+      final json = stroke.toJson();
+
+      // 形状必须与 TS 侧 InkStroke 契约一致
+      expect(json.keys.toSet(), {'points', 'color', 'width'});
+      expect(json['color'], '#e53935');
+      expect(json['width'], 3);
+      final points = json['points'] as List;
+      expect((points.first as Map).keys.toSet(), {'x', 'y', 'pressure', 't'});
+
+      final back = InkStroke.fromJson(json);
+      expect(back.width, 3);
+      expect(back.color.toARGB32(), 0xFFE53935);
+      expect(back.points.length, 2);
+      expect(back.points[1].x, 30);
+      expect(back.points[1].pressure, 0.8);
+      expect(back.points[1].t, 16);
+    });
+
+    test('缺字段的 JSON 不崩溃（向前兼容）', () {
+      final stroke = InkStroke.fromJson(<String, dynamic>{'points': <dynamic>[]});
+      expect(stroke.points, isEmpty);
+      expect(stroke.width, 2);
+    });
+
+    test('墨迹控制器按页存取', () {
+      final ink = PdfInkController();
+      final stroke = InkStroke(color: const Color(0xFF000000), width: 1, points: [InkPoint(x: 1, y: 2)]);
+      ink.addPageStroke(3, stroke);
+      ink.addPageStroke(3, stroke);
+      ink.addPageStroke(5, stroke);
+
+      expect(ink.strokesOf(3).length, 2);
+      expect(ink.strokesOf(5).length, 1);
+      expect(ink.strokesOf(1), isEmpty);
+      expect(ink.hasStrokes, isTrue);
+
+      ink.clear();
+      expect(ink.hasStrokes, isFalse);
     });
   });
 }
