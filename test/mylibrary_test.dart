@@ -540,4 +540,47 @@ void main() {
       expect(merged.hasUnresolvedConflicts, isFalse);
     });
   });
+
+  group('PDF 引擎（设计文档 3.2 / 3.3）', () {
+    test('位置与页码互转（1 起始）', () {
+      final engine = PdfEngine();
+      // 第 0 页 -> 位置 "1" -> 第 0 页
+      expect(engine.positionFor(0), '1');
+      expect(engine.positionFor(9), '10');
+      expect(engine.indexOf('1'), 0);
+      expect(engine.indexOf('10'), 9);
+    });
+
+    test('非法位置不会崩溃', () {
+      final engine = PdfEngine();
+      expect(engine.indexOf(''), 0);
+      expect(engine.indexOf('abc'), 0);
+    });
+
+    test('续读页码在 viewer 就绪前先缓存', () async {
+      final engine = PdfEngine();
+      expect(engine.resumePage, 1);
+      // viewer 未创建，controller 未就绪；goTo 应只记录不报错
+      await engine.goTo('42');
+      expect(engine.resumePage, 42);
+    });
+
+    test('进度按页码计算', () {
+      final engine = PdfEngine();
+      engine.setPageCount(10);
+      engine.setCurrentIndex(0);
+      expect(engine.getCurrentPosition().position, '1');
+      expect(engine.getCurrentPosition().percentage, 0.0);
+
+      engine.setCurrentIndex(5);
+      expect(engine.getCurrentPosition().position, '6');
+      expect(engine.getCurrentPosition().percentage, closeTo(0.5, 1e-9));
+    });
+
+    test('页数为 0 时进度为 0，不出现除零', () {
+      final engine = PdfEngine();
+      engine.setPageCount(0);
+      expect(engine.getCurrentPosition().percentage, 0.0);
+    });
+  });
 }

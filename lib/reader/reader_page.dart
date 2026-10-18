@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
+import 'package:pdfrx/pdfrx.dart';
 
 import '../engines/book_engine.dart';
 import '../engines/epub_webview.dart';
@@ -292,6 +293,17 @@ class _EngineViewState extends State<_EngineView> {
       return _EpubSurface(engine: engine);
     }
 
+    // PDF 由 pdfrx（PDFium FFI）原生渲染
+    if (engine is PdfEngine) {
+      return _PdfSurface(
+        engine: engine,
+        // 页码/页数变化要刷新父级的底栏和进度，不能只 setState 自己
+        onChanged: () {
+          if (mounted) setState(() {});
+        },
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -315,9 +327,51 @@ class _EngineViewState extends State<_EngineView> {
   String _engineBody(BookEngine engine) => switch (engine) {
         TxtEngine() => engine.currentLines().join('\n'),
         MarkdownEngine() => engine.markdown,
-        PdfEngine() => '[PDF 渲染区：pdfrx / PDFium FFI]\n\n第 ${engine.currentIndex + 1} 页',
         _ => '不支持的格式',
       };
+}
+
+/// PDF 渲染面：pdfrx 的 PdfViewer，页码变化回写到引擎。
+class _PdfSurface extends StatefulWidget {
+  const _PdfSurface({required this.engine, required this.onChanged});
+
+  final PdfEngine engine;
+  final VoidCallback onChanged;
+
+  @override
+  State<_PdfSurface> createState() => _PdfSurfaceState();
+}
+
+class _PdfSurfaceState extends State<_PdfSurface> {
+  @override
+  Widget build(BuildContext context) {
+    final engine = widget.engine;
+    return PdfViewer.file(
+      engine.filePath,
+      // 换书时重建 viewer：controller 与文件绑定，复用会残留旧文档状态
+      key: ValueKey('pdf:${engine.filePath}'),
+      controller: engine.controller,
+      // 续读：从 library.json 里记下的页码开始
+      // 续读：用引擎记下的待跳转页码
+      initialPageNumber: engine.resumePage,
+      params: PdfViewerParams(
+        margin: 8,
+        backgroundColor: const Color(0xFFF7F6F3),
+        // 文档加载完成：回填真实页数
+        onDocumentChanged: (document) {
+          if (document == null) return;
+          engine.syncPageCount(document.pages.length);
+          widget.onChanged();
+        },
+        // 页码变化：同步到引擎，驱动底部进度
+        onPageChanged: (pageNumber) {
+          if (pageNumber == null) return;
+          engine.syncCurrentPage(pageNumber);
+          widget.onChanged();
+        },
+      ),
+    );
+  }
 }
 
 /// EPUB 渲染面：把引擎读到的字节注入 WebView，并显示加载/错误状态。

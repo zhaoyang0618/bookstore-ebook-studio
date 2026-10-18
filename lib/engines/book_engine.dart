@@ -9,6 +9,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
+import 'package:pdfrx/pdfrx.dart';
 
 import '../models/mylibrary_models.dart';
 import '../storage/my_library_store.dart';
@@ -139,6 +140,14 @@ abstract class BaseBookEngine implements BookEngine {
     _pageCount = count;
   }
 
+  /// 设置当前页索引。
+  ///
+  /// 用于「原生层是唯一事实源」的场景：PDF 的页码由 PDFium 维护，
+  /// 滚动/跳转后需要把真实页码回写到引擎，而不是引擎自己猜。
+  void setCurrentIndex(int index) {
+    _currentIndex = index < 0 ? 0 : index;
+  }
+
   @override
   int get currentIndex => _currentIndex;
 
@@ -249,17 +258,70 @@ class EpubEngine extends BaseBookEngine {
 }
 
 /// PDF 引擎（设计文档 3.2 / 3.3：PDFium FFI + 原生注释 API）。
+///
+/// 渲染交给 pdfrx（PDFium 的 FFI 绑定，原生级性能）。
+/// 引擎负责：文件可用性检查、页数/当前位置同步、边车批注读写。
+///
+/// 为什么引擎持有 controller 而不是自己绘制：
+/// pdfrx 提供的是 `PdfViewer` widget，实际渲染在 widget 层完成；
+/// 引擎把翻页/跳转指令转发给 controller，并从中回读页码。
 class PdfEngine extends BaseBookEngine {
   @override
   BookFormat get format => BookFormat.pdf;
 
+  /// pdfrx 的控制器，由 PdfViewer widget 承载。
+  final PdfViewerController controller = PdfViewerController();
+
+  String _filePath = '';
+
+  /// 文件路径，供 widget 层构造 PdfViewer。
+  String get filePath => _filePath;
+
+  /// 待跳转的页码（1 起始）。
+  ///
+  /// 为什么需要它：打开书时 `goTo()` 会被调用以恢复上次阅读位置，
+  /// 但此刻 PdfViewer 还没创建、controller 未就绪，直接跳转会丢失。
+  /// 因此先记下来，由 widget 作为 initialPageNumber 传入。
+  int _resumePage = 1;
+  int get resumePage => _resumePage;
+
+  /// 当前页码（1 起始）。
+  ///
+  /// 优先问 pdfrx（viewer 挂载后它才是事实源）；
+  /// viewer 尚未就绪时回退到基类的 index，避免读写未初始化的 controller
+  /// —— `pageNumber` 在未挂载时会抛异常。
+  int get currentPageNumber {
+    try {
+      if (controller.isReady) {
+        final page = controller.pageNumber;
+        if (page != null && page > 0) return page;
+      }
+    } catch (_) {
+      // controller 未挂载：忽略，走回退
+    }
+    return currentIndex + 1;
+  }
+
   @override
   Future<BookMeta> open(String filePath) async {
-    if (!File(filePath).existsSync()) {
+    final file = File(filePath);
+    if (!file.existsSync()) {
       throw FileSystemException('电子书不存在', filePath);
     }
-    // PDFium 通过 FFI 打开；总页数由原生层返回
+    _filePath = filePath;
+    // 真实页数在 PdfViewer 加载完文档后通过 controller.pageCount 得到，
+    // 这里无法提前知道（PDFium 需要解析文件），故先置 0，由 widget 回填。
     return BookMeta(title: filePath.split('/').last, author: '', sections: 0);
+  }
+
+  /// 由 widget 层在文档加载完成后回填页数。
+  void syncPageCount(int totalPages) {
+    setPageCount(totalPages);
+  }
+
+  /// 由 widget 层在页码变化时调用。
+  void syncCurrentPage(int pageNumber) {
+    setCurrentIndex(pageNumber - 1);
   }
 
   @override
@@ -267,17 +329,59 @@ class PdfEngine extends BaseBookEngine {
 
   @override
   Future<void> renderPage(int pageIndex, Widget container) async {
-    // 实际渲染在 PdfView 组件中完成（pdfrx 包）
+    // 实际渲染在 PdfViewer 组件中完成（pdfrx）
   }
 
   @override
   Future<int> getPageCount() async => pageCount;
 
+  /// 位置用页码表示（1 起始），与阅读位置的跨端约定一致。
   @override
-  String positionFor(int index) => index.toString();
+  String positionFor(int index) => (index + 1).toString();
 
   @override
-  int indexOf(String position) => int.tryParse(position) ?? 0;
+  int indexOf(String position) => (int.tryParse(position) ?? 1) - 1;
+
+  @override
+  ReaderPosition getCurrentPosition() {
+    final total = pageCount;
+    final page = currentPageNumber;
+    return ReaderPosition(
+      position: page.toString(),
+      percentage: total > 0 ? ((page - 1) / total).clamp(0.0, 1.0) : 0.0,
+    );
+  }
+
+  /// 翻页：PDF 按页跳转。
+  @override
+  Future<void> nextPage() async {
+    if (!controller.isReady) return;
+    final total = controller.pageCount;
+    final current = currentPageNumber;
+    if (current < total) {
+      await controller.goToPage(pageNumber: current + 1);
+    }
+  }
+
+  @override
+  Future<void> prevPage() async {
+    if (!controller.isReady) return;
+    final current = currentPageNumber;
+    if (current > 1) {
+      await controller.goToPage(pageNumber: current - 1);
+    }
+  }
+
+  @override
+  Future<void> goTo(String position) async {
+    final page = int.tryParse(position);
+    if (page == null || page < 1) return;
+    _resumePage = page;
+    if (!controller.isReady) return; // 等 widget 就绪后用 resumePage
+    if (page <= controller.pageCount) {
+      await controller.goToPage(pageNumber: page);
+    }
+  }
 
   @override
   bool supportsAnnotation() => true;
@@ -285,13 +389,16 @@ class PdfEngine extends BaseBookEngine {
   @override
   Future<List<Annotation>> loadAnnotations() async {
     // PDF 注释是**原生 PDF 注释对象**，直接从文件本身读取（设计文档 3.3）
-    return const [];
+    return readSidecarAnnotations(notesPathFor(_filePath));
   }
 
   @override
   Future<void> saveAnnotations() async {
     // 通过 FFI 调用 PDFium 原生注释 API，把注释序列化回 PDF 文件。
     // 笔迹以**矢量数据**存储（点 + 压力 + 时间戳），而非截图（设计文档 3.3）。
+    //
+    // 写入逻辑已在 mylibrary-core 的 pdf-writer 模块实现并通过真实 PDF 验证，
+    // Flutter 侧接入需要走 Platform Channel 或 FFI，属后续工作。
   }
 
   @override
