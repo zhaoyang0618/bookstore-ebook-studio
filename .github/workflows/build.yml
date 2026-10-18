@@ -213,6 +213,8 @@ jobs:
   # ---------- Android（平板端） ----------
   build-android:
     needs: check
+    permissions:
+      contents: write
     if: >-
       github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.build_targets, 'android')
@@ -230,12 +232,35 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: 构建 APK
-        run: flutter build apk --release
-      - uses: actions/upload-artifact@v4
+        run: |
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee android-build.log
+
+      - name: 上传 APK
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
           name: ebook_studio-android
           path: build/app/outputs/flutter-apk/*.apk
           retention-days: 14
+
+      - name: 失败时输出关键错误
+        if: failure()
+        run: |
+          echo "=== 错误行 ==="
+          grep -nE "error|Error|ERROR|FAILED|FAILURE|Exception|What went wrong|Could not|not found|requires" android-build.log | head -40 || true
+
+      # 同 Windows：把日志推到分支，便于绕过 artifact 认证读取
+      - name: 诊断：日志推到分支
+        if: failure()
+        run: |
+          tail -300 android-build.log > android-build-tail.log || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "ci-log-${{ github.run_id }}"
+          git add -f android-build-tail.log
+          git commit -m "ci: android build log (run ${{ github.run_id }})" || true
+          git push origin "ci-log-${{ github.run_id }}" || true
 
   # ---------- iOS（只出未签名 .app，真机需自签） ----------
   build-ios:
