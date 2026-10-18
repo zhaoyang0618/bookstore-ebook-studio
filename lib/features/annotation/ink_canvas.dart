@@ -5,16 +5,15 @@
 ///
 /// ## 职责边界
 ///
-/// 本组件只负责**捕获当前这一笔并在屏幕上实时跟手**。
-/// 已经落定的笔迹由 `PdfInkController` 通过 pdfrx 的页面绘制回调
-/// 画到页面上（见 `pdf_ink.dart`）——这样缩放、翻页、滚动时
-/// 笔迹始终贴着页面，不需要我们自己算变换矩阵。
+/// 本组件只负责**捕获当前这一笔并在屏幕上实时跟手**（草稿，屏幕坐标）。
+/// 已落定的笔迹由 `PageInkPainter` 在 pdfrx 的页面浮层里绘制
+/// （页面坐标，见 `pdf_ink.dart`）—— 那里是正常的 widget 树，
+/// `setState` 就能重绘，且随页面缩放/滚动自动对齐。
 ///
 /// ## 输入设备
 ///
 /// 支持 `mouse` / `trackpad` / `touch` / `stylus`。
-/// 桌面端（macOS / Windows / Linux）用鼠标或触控板即可书写；
-/// 平板端用手写笔，压力值真实来自硬件。
+/// 桌面端用鼠标或触控板即可书写；平板端用手写笔时压力值来自硬件。
 ///
 /// @module ebook-studio/features/annotation/ink_canvas
 library;
@@ -23,21 +22,78 @@ import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
 
+/// 笔的类型。
+///
+/// 线宽的单位是 **PDF 页面点**（1/72 英寸），这样不同缩放下
+/// 落到纸面上的粗细是一致的。
+enum InkTool {
+  /// 细笔，适合写字与勾画。
+  pen('钢笔', 2, StrokeCap.round, 1),
+
+  /// 粗一些，适合标注重点。
+  marker('记号笔', 6, StrokeCap.round, 1),
+
+  /// 荧光笔：宽、半透明、方头。绘制时用 multiply 混合，
+  /// 让底下的文字透出来而不是被盖住。
+  highlighter('荧光笔', 18, StrokeCap.square, 0.35);
+
+  const InkTool(this.label, this.width, this.cap, this.opacity);
+
+  final String label;
+
+  /// 默认线宽（页面点）。
+  final double width;
+
+  /// 线端样式。荧光笔用方头，涂出来才像马克笔。
+  final StrokeCap cap;
+
+  /// 不透明度。荧光笔半透明。
+  final double opacity;
+}
+
+/// 可选颜色（设计文档 3.5 的批注配色）。
+const List<Color> kInkPalette = [
+  Color(0xFFE53935), // 红
+  Color(0xFF1E88E5), // 蓝
+  Color(0xFF43A047), // 绿
+  Color(0xFFFDD835), // 黄
+  Color(0xFF8E24AA), // 紫
+  Color(0xFF212121), // 黑
+];
+
 /// 一笔的矢量数据（与笔记边车的 strokes 结构一致，设计文档 1.5）。
 ///
-/// 坐标含义由调用方决定：PDF 场景下是**页面坐标**（点，y 向下，原点左上）。
+/// 落盘时 `points` 由调用方转成**页面坐标**（见 `pdf_ink.dart`）。
 class InkStroke {
-  InkStroke({required this.color, required this.width, List<InkPoint>? points}) : points = points ?? [];
+  InkStroke({
+    required this.color,
+    required this.width,
+    List<InkPoint>? points,
+    this.cap = StrokeCap.round,
+  }) : points = points ?? [];
 
   final Color color;
+
+  /// 线宽（页面点）。
   final double width;
+
   final List<InkPoint> points;
 
-  /// 序列化为边车 JSON 里的形状（与 TS 侧 `InkStroke` 契约一致）。
+  /// 线端样式。荧光笔是方头。
+  final StrokeCap cap;
+
+  /// 是否半透明（荧光笔）。
+  bool get isTranslucent => color.a < 1;
+
+  /// 序列化为边车 JSON（与 TS 侧 `InkStroke` 契约一致）。
+  ///
+  /// `cap` 不是契约里的字段，因此只在非默认值时以 `x-cap` 扩展键写出，
+  /// 让 TS 侧读取时忽略它也不会出问题。
   Map<String, dynamic> toJson() => {
         'points': points.map((point) => point.toJson()).toList(),
         'color': '#${_hex(color)}',
         'width': width,
+        if (cap != StrokeCap.round) 'x-cap': cap == StrokeCap.square ? 'square' : 'butt',
       };
 
   /// 从边车 JSON 还原。
@@ -46,28 +102,42 @@ class InkStroke {
     final points = <InkPoint>[];
     if (rawPoints is List) {
       for (final item in rawPoints) {
-        if (item is Map) {
-          points.add(InkPoint.fromJson(Map<String, dynamic>.from(item)));
-        }
+        if (item is Map) points.add(InkPoint.fromJson(Map<String, dynamic>.from(item)));
       }
     }
     return InkStroke(
       color: _parseColor(json['color']),
       width: (json['width'] as num?)?.toDouble() ?? 2,
       points: points,
+      cap: switch (json['x-cap']) {
+        'square' => StrokeCap.square,
+        'butt' => StrokeCap.butt,
+        _ => StrokeCap.round,
+      },
     );
   }
 
-  static String _hex(Color color) =>
-      color.toARGB32().toRadixString(16).padLeft(8, '0').substring(2);
+  /// 带透明度信息的十六进制（`#AARRGGBB` 或 `#RRGGBB`）。
+  static String _hex(Color color) {
+    final argb = color.toARGB32();
+    final alpha = (argb >> 24) & 0xFF;
+    final rgb = (argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0');
+    if (alpha == 0xFF) return rgb;
+    return '${alpha.toRadixString(16).padLeft(2, '0')}$rgb';
+  }
 
   static Color _parseColor(Object? value) {
-    if (value is! String) return const Color(0xFFFF0000);
+    if (value is! String) return const Color(0xFFE53935);
     final hex = value.replaceFirst('#', '');
-    final rgb = hex.length == 8 ? hex.substring(2) : hex;
-    if (rgb.length != 6) return const Color(0xFFFF0000);
-    final parsed = int.tryParse(rgb, radix: 16);
-    return parsed == null ? const Color(0xFFFF0000) : Color(0xFF000000 | parsed);
+    if (hex.length == 8) {
+      final parsed = int.tryParse(hex, radix: 16);
+      return parsed == null ? const Color(0xFFE53935) : Color(parsed);
+    }
+    if (hex.length == 6) {
+      final parsed = int.tryParse(hex, radix: 16);
+      return parsed == null ? const Color(0xFFE53935) : Color(0xFF000000 | parsed);
+    }
+    return const Color(0xFFE53935);
   }
 }
 
@@ -96,20 +166,31 @@ class InkPoint {
 
 /// 手写标注画布。
 ///
-/// 只绘制**进行中的那一笔**；已完成笔迹由外部（pdfrx 页面回调）负责绘制。
+/// 只绘制**进行中的那一笔**（草稿）；已完成笔迹由页面浮层绘制。
+/// 输出的笔迹 `points` 是**屏幕坐标**，`width` 是**页面点**，
+/// 由调用方负责把点转成页面坐标后落盘。
 class InkCanvas extends StatefulWidget {
   const InkCanvas({
     required this.onStrokeEnd,
-    this.color = const Color(0xFFE53935),
-    this.width = 2,
+    required this.color,
+    required this.width,
+    this.cap = StrokeCap.round,
+    this.displayScale = 1,
     super.key,
   });
 
-  /// 一笔结束时的回调，返回**屏幕坐标**的笔迹。
+  /// 一笔结束时的回调。
   final void Function(InkStroke stroke) onStrokeEnd;
 
   final Color color;
+
+  /// 线宽（页面点）。
   final double width;
+
+  final StrokeCap cap;
+
+  /// 页面 → 屏幕的缩放比。仅用于把草稿画成与最终一致的粗细。
+  final double displayScale;
 
   @override
   State<InkCanvas> createState() => _InkCanvasState();
@@ -119,7 +200,6 @@ class _InkCanvasState extends State<InkCanvas> {
   InkStroke? _current;
   DateTime? _strokeStart;
 
-  /// 只接受指针类事件；滚轮/悬停不参与书写。
   bool _isDrawingDevice(PointerDeviceKind kind) =>
       kind == PointerDeviceKind.mouse ||
       kind == PointerDeviceKind.touch ||
@@ -127,7 +207,7 @@ class _InkCanvasState extends State<InkCanvas> {
       kind == PointerDeviceKind.invertedStylus ||
       kind == PointerDeviceKind.trackpad;
 
-  /// 取压感值。鼠标 / 触控板没有压感，统一给 1，避免笔迹被画得过细。
+  /// 鼠标 / 触控板没有压感，统一给 1，避免笔迹被画得过细。
   double _pressureOf(PointerEvent event) {
     final pressure = event.pressure;
     if (pressure <= 0) return 1;
@@ -137,8 +217,8 @@ class _InkCanvasState extends State<InkCanvas> {
   @override
   Widget build(BuildContext context) {
     return Listener(
-      // 用 Listener 而非 GestureDetector：拿到原始指针事件，
-      // 不做手势竞争判定，落笔即画，延迟最低。
+      // 用 Listener 而非 GestureDetector：拿原始指针事件，不做手势竞争判定，
+      // 落笔即画，延迟最低。平移冲突由外层的 AbsorbPointer 解决。
       behavior: HitTestBehavior.opaque,
       onPointerDown: (event) {
         if (!_isDrawingDevice(event.kind)) return;
@@ -147,6 +227,7 @@ class _InkCanvasState extends State<InkCanvas> {
         _current = InkStroke(
           color: widget.color,
           width: widget.width,
+          cap: widget.cap,
           points: [
             InkPoint(
               x: event.localPosition.dx,
@@ -173,10 +254,8 @@ class _InkCanvasState extends State<InkCanvas> {
       onPointerUp: (event) {
         final stroke = _current;
         _current = null;
-        if (stroke == null) return;
         _strokeStart = null;
-        // 单点轻点也保留（屏幕上是个小圆点）
-        if (stroke.points.isNotEmpty) {
+        if (stroke != null && stroke.points.isNotEmpty) {
           widget.onStrokeEnd(stroke);
         }
         setState(() {});
@@ -187,39 +266,48 @@ class _InkCanvasState extends State<InkCanvas> {
         setState(() {});
       },
       child: CustomPaint(
-        painter: InkPainter(current: _current),
+        painter: DraftInkPainter(stroke: _current, displayScale: widget.displayScale),
         size: Size.infinite,
       ),
     );
   }
 }
 
-/// 进行中笔迹的绘制器（屏幕坐标）。
-class InkPainter extends CustomPainter {
-  const InkPainter({this.current});
+/// 草稿笔迹绘制器（屏幕坐标）。
+class DraftInkPainter extends CustomPainter {
+  const DraftInkPainter({this.stroke, this.displayScale = 1});
 
-  final InkStroke? current;
+  final InkStroke? stroke;
+
+  /// 页面 → 屏幕缩放，用于把页面点线宽换算成屏幕线宽。
+  final double displayScale;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final stroke = current;
-    if (stroke == null) return;
-    final points = stroke.points;
+    final current = stroke;
+    if (current == null) return;
+    final points = current.points;
     if (points.isEmpty) return;
 
+    final screenWidth = (current.width * displayScale).clamp(0.5, 200.0);
     final paint = Paint()
-      ..color = stroke.color
-      ..strokeWidth = stroke.width
+      ..color = current.color
+      ..strokeWidth = screenWidth
       ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
+      ..strokeCap = current.cap
       ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
+      ..isAntiAlias = true
+      // 半透明笔（荧光笔）用 multiply，让底下文字透出来
+      ..blendMode = current.isTranslucent ? BlendMode.multiply : BlendMode.srcOver;
 
     if (points.length == 1) {
       canvas.drawCircle(
         Offset(points.first.x, points.first.y),
-        stroke.width / 2,
-        paint..style = PaintingStyle.fill,
+        screenWidth / 2,
+        Paint()
+          ..color = current.color
+          ..blendMode = paint.blendMode
+          ..style = PaintingStyle.fill,
       );
       return;
     }
@@ -232,5 +320,5 @@ class InkPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(InkPainter oldDelegate) => true;
+  bool shouldRepaint(DraftInkPainter oldDelegate) => true;
 }

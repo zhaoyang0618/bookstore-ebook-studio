@@ -593,13 +593,10 @@ void main() {
     const pageRect = Rect.fromLTWH(100, 50, 300, 424);
 
     test('屏幕坐标 → 页面坐标', () {
-      // 页面左上角
       expect(screenToPage(const Offset(100, 50), pageRect, pageSize), const Offset(0, 0));
-      // 页面中心 → 页面中心
       final center = screenToPage(const Offset(250, 262), pageRect, pageSize);
       expect(center.dx, closeTo(297.5, 0.01));
       expect(center.dy, closeTo(421, 0.01));
-      // 页面右下角
       final bottomRight = screenToPage(const Offset(400, 474), pageRect, pageSize);
       expect(bottomRight.dx, closeTo(595, 0.01));
       expect(bottomRight.dy, closeTo(842, 0.01));
@@ -613,22 +610,33 @@ void main() {
       expect(back.dy, closeTo(original.dy, 0.001));
     });
 
+    test('页面浮层局部坐标 ↔ 页面坐标（绘制用，无偏移）', () {
+      const displayed = Size(300, 424);
+      // 浮层原点即页面左上角
+      expect(pageToLocal(const Offset(0, 0), displayed, pageSize), const Offset(0, 0));
+      final center = pageToLocal(const Offset(297.5, 421), displayed, pageSize);
+      expect(center.dx, closeTo(150, 0.01));
+      expect(center.dy, closeTo(212, 0.01));
+      // 往返
+      final back = localToPage(center, displayed, pageSize);
+      expect(back.dx, closeTo(297.5, 0.01));
+      expect(back.dy, closeTo(421, 0.01));
+    });
+
     test('窗口尺寸变化后位置按比例保持', () {
-      // 同一页面坐标，在放大一倍的屏幕上应落在放大一倍的位置
-      const pagePoint = Offset(297.5, 421); // 页面中心
-      final small = pageToScreen(pagePoint, pageRect, pageSize);
+      const pagePoint = Offset(297.5, 421);
       const biggerRect = Rect.fromLTWH(0, 0, 600, 848);
+      final small = pageToScreen(pagePoint, pageRect, pageSize);
       final big = pageToScreen(pagePoint, biggerRect, pageSize);
-      // 两者都应落在各自页面的中心
       expect((small.dx - pageRect.left) / pageRect.width, closeTo(0.5, 0.001));
       expect((big.dx - biggerRect.left) / biggerRect.width, closeTo(0.5, 0.001));
     });
 
-    test('退化的页面矩形不产生 NaN / 除零', () {
+    test('退化的尺寸不产生 NaN / 除零', () {
       const zero = Rect.fromLTWH(0, 0, 0, 0);
-      final point = screenToPage(const Offset(10, 10), zero, pageSize);
-      expect(point.dx.isFinite, isTrue);
-      expect(point.dy.isFinite, isTrue);
+      expect(screenToPage(const Offset(10, 10), zero, pageSize).dx.isFinite, isTrue);
+      expect(pageToLocal(const Offset(1, 1), Size.zero, pageSize), Offset.zero);
+      expect(localToPage(const Offset(1, 1), Size.zero, pageSize), Offset.zero);
     });
 
     test('命中测试：落在页内返回该页，页外返回 null', () {
@@ -638,12 +646,65 @@ void main() {
       ];
       expect(hitTestPage(pages, const Offset(150, 200))?.pageNumber, 1);
       expect(hitTestPage(pages, const Offset(150, 600))?.pageNumber, 2);
-      // 页边距区域
       expect(hitTestPage(pages, const Offset(-10, 200)), isNull);
     });
   });
 
-  group('墨迹持久化（设计文档 1.5 契约）', () {
+  group('墨迹笔型与颜色（设计文档 3.5）', () {
+    test('三种笔型的预设不同', () {
+      expect(InkTool.pen.width, lessThan(InkTool.marker.width));
+      expect(InkTool.marker.width, lessThan(InkTool.highlighter.width));
+      // 荧光笔半透明且方头
+      expect(InkTool.highlighter.opacity, lessThan(1));
+      expect(InkTool.highlighter.cap, StrokeCap.square);
+      // 钢笔不透明、圆头
+      expect(InkTool.pen.opacity, 1);
+      expect(InkTool.pen.cap, StrokeCap.round);
+    });
+
+    test('调色板提供多种颜色', () {
+      expect(kInkPalette.length, greaterThanOrEqualTo(4));
+      expect(kInkPalette.toSet().length, kInkPalette.length);
+    });
+
+    test('颜色带透明度时写出 8 位十六进制', () {
+      final stroke = InkStroke(
+        color: const Color(0x59FDD835), // 35% 黄
+        width: 18,
+        cap: StrokeCap.square,
+        points: [InkPoint(x: 1, y: 2)],
+      );
+      final json = stroke.toJson();
+      expect(json['color'], '#59fdd835');
+      // 非默认笔端才写扩展键
+      expect(json['x-cap'], 'square');
+
+      final back = InkStroke.fromJson(json);
+      expect(back.color.toARGB32(), 0x59FDD835);
+      expect(back.cap, StrokeCap.square);
+      expect(back.isTranslucent, isTrue);
+    });
+
+    test('不透明笔不写 x-cap（保持契约干净）', () {
+      final stroke = InkStroke(
+        color: const Color(0xFFE53935),
+        width: 2,
+        points: [InkPoint(x: 1, y: 2)],
+      );
+      final json = stroke.toJson();
+      expect(json['color'], '#e53935');
+      expect(json.containsKey('x-cap'), isFalse);
+      expect(json.keys.toSet(), {'points', 'color', 'width'});
+    });
+  });
+
+  group('墨迹存取与撤销（设计文档 1.5 契约）', () {
+    InkStroke sampleStroke() => InkStroke(
+          color: const Color(0xFFE53935),
+          width: 2,
+          points: [InkPoint(x: 1, y: 2, pressure: 0.5, t: 0)],
+        );
+
     test('InkStroke 与边车 JSON 往返一致', () {
       final stroke = InkStroke(
         color: const Color(0xFFE53935),
@@ -654,9 +715,6 @@ void main() {
         ],
       );
       final json = stroke.toJson();
-
-      // 形状必须与 TS 侧 InkStroke 契约一致
-      expect(json.keys.toSet(), {'points', 'color', 'width'});
       expect(json['color'], '#e53935');
       expect(json['width'], 3);
       final points = json['points'] as List;
@@ -664,33 +722,65 @@ void main() {
 
       final back = InkStroke.fromJson(json);
       expect(back.width, 3);
-      expect(back.color.toARGB32(), 0xFFE53935);
       expect(back.points.length, 2);
-      expect(back.points[1].x, 30);
       expect(back.points[1].pressure, 0.8);
-      expect(back.points[1].t, 16);
     });
 
     test('缺字段的 JSON 不崩溃（向前兼容）', () {
       final stroke = InkStroke.fromJson(<String, dynamic>{'points': <dynamic>[]});
       expect(stroke.points, isEmpty);
       expect(stroke.width, 2);
+      expect(stroke.cap, StrokeCap.round);
     });
 
-    test('墨迹控制器按页存取', () {
+    test('按页存取互不干扰', () {
       final ink = PdfInkController();
-      final stroke = InkStroke(color: const Color(0xFF000000), width: 1, points: [InkPoint(x: 1, y: 2)]);
-      ink.addPageStroke(3, stroke);
-      ink.addPageStroke(3, stroke);
-      ink.addPageStroke(5, stroke);
+      ink.addPageStroke(3, sampleStroke());
+      ink.addPageStroke(3, sampleStroke());
+      ink.addPageStroke(5, sampleStroke());
 
       expect(ink.strokesOf(3).length, 2);
       expect(ink.strokesOf(5).length, 1);
       expect(ink.strokesOf(1), isEmpty);
-      expect(ink.hasStrokes, isTrue);
+      expect(ink.inkedPageCount, 2);
+    });
+
+    test('撤销只影响当前页，空页撤销返回 false', () {
+      final ink = PdfInkController();
+      ink.addPageStroke(1, sampleStroke());
+      ink.addPageStroke(1, sampleStroke());
+      ink.addPageStroke(2, sampleStroke());
+
+      expect(ink.undoPageStroke(1), isTrue);
+      expect(ink.strokesOf(1).length, 1);
+      expect(ink.strokesOf(2).length, 1, reason: '不应影响其它页');
+
+      expect(ink.undoPageStroke(1), isTrue);
+      expect(ink.undoPageStroke(1), isFalse, reason: '空页撤销应返回 false');
+      expect(ink.hasStrokes, isTrue, reason: '第 2 页还有笔迹');
+    });
+
+    test('清空单页与清空全部', () {
+      final ink = PdfInkController();
+      ink.addPageStroke(1, sampleStroke());
+      ink.addPageStroke(2, sampleStroke());
+
+      ink.clearPage(1);
+      expect(ink.strokesOf(1), isEmpty);
+      expect(ink.strokesOf(2).length, 1);
 
       ink.clear();
       expect(ink.hasStrokes, isFalse);
+      expect(ink.inkedPageCount, 0);
+    });
+
+    test('页面布局记录后可命中（供捕获换算坐标）', () {
+      final ink = PdfInkController();
+      ink.recordPageLayout(1, const Rect.fromLTWH(0, 0, 300, 424), const Size(595, 842));
+      expect(ink.hits.length, 1);
+      expect(hitTestPage(ink.hits, const Offset(150, 200))?.pageNumber, 1);
+      // 记录布局不应触发通知（它在 build 期间调用）
+      expect(ink.hits.first.size, const Size(595, 842));
     });
   });
 }

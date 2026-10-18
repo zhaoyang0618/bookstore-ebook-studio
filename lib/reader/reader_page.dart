@@ -39,6 +39,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   /// PDF 墨迹层：负责坐标映射与按页存取（见 features/annotation/pdf_ink.dart）。
   final PdfInkController _ink = PdfInkController();
 
+  /// 当前笔型与颜色。
+  InkTool _inkTool = InkTool.pen;
+  Color _inkColor = kInkPalette.first;
+
   /// 当前批注列表的镜像，避免在回调里读到过期的 provider 值。
   List<Annotation> _annotations = const [];
 
@@ -82,6 +86,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     final pageStroke = InkStroke(
       color: screenStroke.color,
       width: screenStroke.width,
+      cap: screenStroke.cap,
       points: points,
     );
     _ink.addPageStroke(hit.pageNumber, pageStroke);
@@ -101,6 +106,57 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     // 手写内容「画完就不能丢」，立即落盘
     unawaited(_persistAnnotations());
     if (mounted) setState(() {});
+  }
+
+  /// 当前显示比例（页面点 → 屏幕像素）。取不到时按 1 处理。
+  double _currentDisplayScale() {
+    final hits = _ink.hits;
+    if (hits.isEmpty) return 1;
+    final size = hits.first.size;
+    if (size.width <= 0) return 1;
+    return hits.first.rect.width / size.width;
+  }
+
+  /// 当前页的墨迹笔数。
+  int _currentPageInkCount() {
+    final page = _engine?.currentIndex != null ? (_engine!.currentIndex + 1) : 1;
+    return _ink.strokesOf(page).length;
+  }
+
+  /// 当前页墨迹对应的批注（按落笔顺序）。
+  List<Annotation> _inkAnnotationsOfPage(int page) => _annotations
+      .where((a) => a.type == 'ink' && ((a.anchor['page'] as num?)?.toInt() ?? -1) == page)
+      .toList();
+
+  /// 撤销当前页的最后一笔。
+  void _undoLastStroke() {
+    final page = (_engine?.currentIndex ?? 0) + 1;
+    if (!_ink.undoPageStroke(page)) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('当前页没有可撤销的笔迹')));
+      return;
+    }
+    // 同步删掉对应的批注：墨迹层与批注列表必须一致，否则重开又回来
+    final pageAnnotations = _inkAnnotationsOfPage(page);
+    if (pageAnnotations.isNotEmpty) {
+      final last = pageAnnotations.last;
+      _annotations = _annotations.where((a) => a.id != last.id).toList();
+      ref.read(annotationsProvider.notifier).state = _annotations;
+    }
+    unawaited(_persistAnnotations());
+    setState(() {});
+  }
+
+  /// 清空当前页墨迹。
+  void _clearCurrentPage() {
+    final page = (_engine?.currentIndex ?? 0) + 1;
+    _ink.clearPage(page);
+    _annotations = _annotations
+        .where((a) => !(a.type == 'ink' && ((a.anchor['page'] as num?)?.toInt() ?? -1) == page))
+        .toList();
+    ref.read(annotationsProvider.notifier).state = _annotations;
+    unawaited(_persistAnnotations());
+    setState(() {});
   }
 
   /// 持久化当前批注列表。
@@ -260,13 +316,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                     book: book,
                     onOpen: () => _open(book, effectiveRoot),
                     ink: _ink,
+                    inkMode: _inkMode,
                   ),
                 ),
                 // 手写标注层（设计文档 3.3：矢量笔迹）
                 if (_inkMode)
                   Positioned.fill(
                     child: InkCanvas(
-                      onStrokeEnd: (screenStroke) => _commitInkStroke(screenStroke),
+                      color: _inkColor.withValues(alpha: _inkTool.opacity),
+                      width: _inkTool.width,
+                      cap: _inkTool.cap,
+                      // 草稿线宽按页面显示比例放大，落定后才与之一致
+                      displayScale: _currentDisplayScale(),
+                      onStrokeEnd: _commitInkStroke,
                     ),
                   ),
               ],
@@ -277,30 +339,42 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              OutlinedButton.icon(
-                onPressed: () async {
-                  await _engine?.prevPage();
-                  await _savePosition(book, effectiveRoot);
-                  setState(() {});
-                },
-                icon: const Icon(Icons.chevron_left),
-                label: const Text('上一页'),
-              ),
-              Text('${(progress * 100).round()}%', style: Theme.of(context).textTheme.labelLarge),
-              FilledButton.icon(
-                onPressed: () async {
-                  await _engine?.nextPage();
-                  await _savePosition(book, effectiveRoot);
-                  setState(() {});
-                },
-                icon: const Icon(Icons.chevron_right),
-                label: const Text('下一页'),
-              ),
-            ],
-          ),
+          child: _inkMode
+              ? _InkToolbar(
+                  tool: _inkTool,
+                  color: _inkColor,
+                  canUndo: _currentPageInkCount() > 0,
+                  onToolChanged: (tool) => setState(() => _inkTool = tool),
+                  onColorChanged: (color) => setState(() => _inkColor = color),
+                  onUndo: _undoLastStroke,
+                  onClearPage: _clearCurrentPage,
+                  onDone: () => setState(() => _inkMode = false),
+                )
+              : Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        await _engine?.prevPage();
+                        await _savePosition(book, effectiveRoot);
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.chevron_left),
+                      label: const Text('上一页'),
+                    ),
+                    Text('${(progress * 100).round()}%',
+                        style: Theme.of(context).textTheme.labelLarge),
+                    FilledButton.icon(
+                      onPressed: () async {
+                        await _engine?.nextPage();
+                        await _savePosition(book, effectiveRoot);
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.chevron_right),
+                      label: const Text('下一页'),
+                    ),
+                  ],
+                ),
         ),
       ),
     );
@@ -350,6 +424,7 @@ class _EngineView extends StatefulWidget {
     required this.book,
     required this.onOpen,
     required this.ink,
+    required this.inkMode,
   });
 
   final BookEngine? engine;
@@ -358,6 +433,9 @@ class _EngineView extends StatefulWidget {
 
   /// PDF 墨迹层（其它格式用不到，但统一透传保持签名一致）。
   final PdfInkController ink;
+
+  /// 是否处于手写模式。
+  final bool inkMode;
 
   @override
   State<_EngineView> createState() => _EngineViewState();
@@ -390,6 +468,7 @@ class _EngineViewState extends State<_EngineView> {
       return _PdfSurface(
         engine: engine,
         ink: widget.ink,
+        inkMode: widget.inkMode,
         // 页码/页数变化要刷新父级的底栏和进度，不能只 setState 自己
         onChanged: () {
           if (mounted) setState(() {});
@@ -424,11 +503,12 @@ class _EngineViewState extends State<_EngineView> {
       };
 }
 
-/// PDF 渲染面：pdfrx 的 PdfViewer，页码变化回写到引擎。
+/// PDF 渲染面：pdfrx 的 PdfViewer，页码变化回写到引擎，墨迹走页面浮层。
 class _PdfSurface extends StatefulWidget {
   const _PdfSurface({
     required this.engine,
     required this.ink,
+    required this.inkMode,
     required this.onChanged,
   });
 
@@ -437,6 +517,9 @@ class _PdfSurface extends StatefulWidget {
   /// 墨迹层：既用于绘制已落定的笔迹，也用于提供页面屏幕矩形。
   final PdfInkController ink;
 
+  /// 是否处于手写模式（手写时屏蔽 pdfrx 的手势，否则画的同时页面会平移）。
+  final bool inkMode;
+
   final VoidCallback onChanged;
 
   @override
@@ -444,40 +527,92 @@ class _PdfSurface extends StatefulWidget {
 }
 
 class _PdfSurfaceState extends State<_PdfSurface> {
-  /// 回调列表保持同一实例：`PdfViewerParams` 用 == 比较，
-  /// 每次 build 新建 list 会被判定为参数变化，导致 viewer 反复更新。
-  late final List<PdfViewerPagePaintCallback> _paintCallbacks = [widget.ink.paintPage];
+  /// 回调保持同一实例：`PdfViewerParams` 用 == 比较，
+  /// 每次 build 新建闭包会被判定为参数变化。
+  late final PdfPageOverlaysBuilder _overlaysBuilder = _buildPageOverlays;
+
+  /// 监听墨迹变化，让页面浮层里的 CustomPaint 重绘。
+  ///
+  /// 注意：pdfrx 只在参数「需要 reload」时才重建页面，
+  /// 单纯加一笔墨迹不会触发它的重绘 —— 这正是之前
+  /// 「画的时候有线、抬笔就消失」的原因。所以这里用 setState
+  /// 驱动**我们自己的**浮层重绘。
+  @override
+  void initState() {
+    super.initState();
+    widget.ink.addListener(_onInkChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.ink.removeListener(_onInkChanged);
+    super.dispose();
+  }
+
+  void _onInkChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 每页的浮层：把该页墨迹画上去。
+  ///
+  /// pdfrx 会把返回的 widget 用 Positioned 精确铺在页面上，
+  /// 所以这里的局部坐标原点就是页面左上角。
+  List<Widget> _buildPageOverlays(BuildContext context, Rect pageRect, PdfPage page) {
+    final pageSize = Size(page.width, page.height);
+    // 记录布局，供全屏捕获层做坐标换算
+    widget.ink.recordPageLayout(page.pageNumber, pageRect, pageSize);
+
+    final strokes = widget.ink.strokesOf(page.pageNumber);
+    if (strokes.isEmpty) return const [];
+
+    return [
+      // 荧光笔要压在文字下面，用 multiply 混合即可；
+      // 这里不拦截指针，手势交给 pdfrx 与全屏捕获层。
+      IgnorePointer(
+        child: CustomPaint(
+          painter: PageInkPainter(
+            strokes: strokes,
+            pageSize: pageSize,
+            displayedSize: pageRect.size,
+          ),
+          size: pageRect.size,
+        ),
+      ),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
     final engine = widget.engine;
-    return PdfViewer.file(
-      engine.filePath,
-      // 换书时重建 viewer：controller 与文件绑定，复用会残留旧文档状态
-      key: ValueKey('pdf:${engine.filePath}'),
-      controller: engine.controller,
-      // 续读：从 library.json 里记下的页码开始
-      // 续读：用引擎记下的待跳转页码
-      initialPageNumber: engine.resumePage,
-      params: PdfViewerParams(
-        margin: 8,
-        backgroundColor: const Color(0xFFF7F6F3),
-        // 关键：pdfrx 为每页调用这个回调，并给出该页当前的屏幕矩形。
-        // 我们借它 (1) 记录页面矩形供墨迹坐标换算 (2) 把该页墨迹画到页面上。
-        // 由 pdfrx 负责缩放/平移，笔迹因此天然随页面移动。
-        pagePaintCallbacks: _paintCallbacks,
-        // 文档加载完成：回填真实页数
-        onDocumentChanged: (document) {
-          if (document == null) return;
-          engine.syncPageCount(document.pages.length);
-          widget.onChanged();
-        },
-        // 页码变化：同步到引擎，驱动底部进度
-        onPageChanged: (pageNumber) {
-          if (pageNumber == null) return;
-          engine.syncCurrentPage(pageNumber);
-          widget.onChanged();
-        },
+    return AbsorbPointer(
+      // 手写模式下屏蔽 pdfrx 的手势：否则画的同时页面会跟着平移。
+      // 用 AbsorbPointer 而不是 panEnabled 参数，是因为
+      // PdfViewerParams.doChangesRequireReload() 把 panEnabled 算作
+      // 「需要 reload」，切换手写模式会重载整个文档。
+      absorbing: widget.inkMode,
+      child: PdfViewer.file(
+        engine.filePath,
+        // 换书时重建 viewer：controller 与文件绑定，复用会残留旧文档状态
+        key: ValueKey('pdf:${engine.filePath}'),
+        controller: engine.controller,
+        // 续读：用引擎记下的待跳转页码
+        initialPageNumber: engine.resumePage,
+        params: PdfViewerParams(
+          margin: 8,
+          backgroundColor: const Color(0xFFF7F6F3),
+          pageOverlaysBuilder: _overlaysBuilder,
+          onDocumentChanged: (document) {
+            if (document == null) return;
+            engine.syncPageCount(document.pages.length);
+            widget.onChanged();
+          },
+          // 页码变化：同步到引擎，驱动底部进度
+          onPageChanged: (pageNumber) {
+            if (pageNumber == null) return;
+            engine.syncCurrentPage(pageNumber);
+            widget.onChanged();
+          },
+        ),
       ),
     );
   }
@@ -556,4 +691,100 @@ class _EpubSurfaceState extends State<_EpubSurface> {
       ],
     );
   }
+}
+
+/// 手写工具栏：笔型、颜色、撤销、清空本页。
+class _InkToolbar extends StatelessWidget {
+  const _InkToolbar({
+    required this.tool,
+    required this.color,
+    required this.canUndo,
+    required this.onToolChanged,
+    required this.onColorChanged,
+    required this.onUndo,
+    required this.onClearPage,
+    required this.onDone,
+  });
+
+  final InkTool tool;
+  final Color color;
+  final bool canUndo;
+  final ValueChanged<InkTool> onToolChanged;
+  final ValueChanged<Color> onColorChanged;
+  final VoidCallback onUndo;
+  final VoidCallback onClearPage;
+  final VoidCallback onDone;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Wrap(
+      spacing: 12,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        // 笔型
+        SegmentedButton<InkTool>(
+          segments: [
+            for (final item in InkTool.values)
+              ButtonSegment(
+                value: item,
+                icon: Icon(_toolIcon(item), size: 18),
+                tooltip: item.label,
+              ),
+          ],
+          selected: {tool},
+          showSelectedIcon: false,
+          onSelectionChanged: (selection) => onToolChanged(selection.first),
+        ),
+        // 颜色
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final swatch in kInkPalette)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: InkWell(
+                  onTap: () => onColorChanged(swatch),
+                  customBorder: const CircleBorder(),
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: swatch.withValues(alpha: tool.opacity),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: swatch == color ? theme.colorScheme.primary : Colors.black26,
+                        width: swatch == color ? 3 : 1,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        IconButton(
+          tooltip: '撤销上一笔',
+          icon: const Icon(Icons.undo),
+          onPressed: canUndo ? onUndo : null,
+        ),
+        IconButton(
+          tooltip: '清空本页墨迹',
+          icon: const Icon(Icons.layers_clear),
+          onPressed: onClearPage,
+        ),
+        FilledButton.icon(
+          onPressed: onDone,
+          icon: const Icon(Icons.check),
+          label: const Text('完成'),
+        ),
+      ],
+    );
+  }
+
+  IconData _toolIcon(InkTool tool) => switch (tool) {
+        InkTool.pen => Icons.edit,
+        InkTool.marker => Icons.brush,
+        InkTool.highlighter => Icons.format_color_fill,
+      };
 }
