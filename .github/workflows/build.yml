@@ -307,20 +307,15 @@ jobs:
       - name: 列出产物
         run: find artifacts -type f | sort
 
-      - name: 创建 Release 并上传
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          # 收集所有产物文件（跳过日志类 artifact）
-          FILES=$(find artifacts -type f ! -name '*build-tail.log' ! -name 'windows-build-log*' | sort)
-          echo "将上传以下文件："
-          echo "$FILES"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" $FILES --clobber
-          else
-            gh release create "$TAG" \
-              --title "ebook studio $TAG" \
-              --generate-notes \
-              $FILES
-          fi
+      - name: 创建 Release 并上传产物
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ebook studio ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/ebook_studio-macos/*.zip
+            artifacts/ebook_studio-windows/*.zip
+            artifacts/ebook_studio-linux/*.tar.gz
+            artifacts/ebook_studio-android/*.apk
+            artifacts/ebook_studio-ios-unsigned/*.zip
