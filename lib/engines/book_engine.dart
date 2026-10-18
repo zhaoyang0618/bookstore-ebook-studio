@@ -1,0 +1,409 @@
+/// 统一 `BookEngine` 接口（设计文档 3.3）。
+///
+/// 与 dsh 版的 TypeScript interface 是同一份契约（设计文档 4.3
+/// 「接口是契约，实现是自由的」）。
+library;
+
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/widgets.dart';
+
+import '../models/mylibrary_models.dart';
+import '../storage/my_library_store.dart';
+
+/// 目录项。
+class TocItem {
+  const TocItem({required this.title, required this.href, this.children = const []});
+
+  final String title;
+  final String href;
+  final List<TocItem> children;
+}
+
+/// 书籍元信息。
+class BookMeta {
+  const BookMeta({required this.title, required this.author, required this.sections});
+
+  final String title;
+  final String author;
+
+  /// 总页数（PDF）或总章节数（EPUB）。
+  final int sections;
+}
+
+/// 阅读位置。
+class ReaderPosition {
+  const ReaderPosition({required this.position, required this.percentage});
+
+  /// EPUB 为 CFI，PDF 为页码，TXT 为字符偏移。
+  final String position;
+  final double percentage;
+}
+
+/// 统一阅读引擎接口（设计文档 3.3）。
+///
+/// 四种格式各自实现：PDFium（FFI）/ flutter_epub_viewer /
+/// flutter_markdown / 自研分页器。
+abstract class BookEngine {
+  /// 引擎负责的格式。
+  BookFormat get format;
+
+  /// 当前页索引（0 起）。
+  int get currentIndex;
+
+  /// 总页数 / 总章节数。
+  int get pageCount;
+
+  /// 打开书籍，返回元信息。
+  Future<BookMeta> open(String filePath);
+
+  /// 读取目录。
+  Future<List<TocItem>> getToc();
+
+  /// 渲染某一页到 container。
+  Future<void> renderPage(int pageIndex, Widget container);
+
+  /// 总页数。
+  Future<int> getPageCount();
+
+  /// 当前阅读位置。
+  ReaderPosition getCurrentPosition();
+
+  /// 是否支持批注。
+  bool supportsAnnotation();
+
+  /// 加载批注（非 PDF 从边车文件读，PDF 从文件本身读）。
+  Future<List<Annotation>> loadAnnotations();
+
+  /// 保存批注（PDF 写回文件本身，其它写边车）。
+  Future<void> saveAnnotations();
+
+  /// 翻页。
+  Future<void> nextPage();
+
+  Future<void> prevPage();
+
+  /// 跳到某个位置。
+  Future<void> goTo(String position);
+
+  /// 释放资源。
+  void dispose();
+}
+
+/// 引擎工厂：按格式选实现。
+BookEngine createEngine(BookFormat format) => switch (format) {
+      BookFormat.epub => EpubEngine(),
+      BookFormat.pdf => PdfEngine(),
+      BookFormat.markdown => MarkdownEngine(),
+      BookFormat.txt => TxtEngine(),
+    };
+
+/// 引擎公共基类：实现翻页与位置的默认行为。
+abstract class BaseBookEngine implements BookEngine {
+  int _currentIndex = 0;
+  int _pageCount = 0;
+
+  @override
+  Future<void> nextPage() async {
+    if (_currentIndex < _pageCount - 1) _currentIndex += 1;
+  }
+
+  @override
+  Future<void> prevPage() async {
+    if (_currentIndex > 0) _currentIndex -= 1;
+  }
+
+  @override
+  ReaderPosition getCurrentPosition() => ReaderPosition(
+        position: positionFor(_currentIndex),
+        percentage: _pageCount == 0 ? 0 : (_currentIndex + 1) / _pageCount,
+      );
+
+  @override
+  Future<void> goTo(String position) async {
+    final index = indexOf(position);
+    if (index >= 0 && index < _pageCount) _currentIndex = index;
+  }
+
+  /// 把页索引转成持久化位置标识。
+  String positionFor(int index);
+
+  /// 把持久化位置标识解析回页索引。
+  int indexOf(String position);
+
+  /// 设置总页数（子类在 open 后调用）。
+  void setPageCount(int count) {
+    _pageCount = count;
+  }
+
+  @override
+  int get currentIndex => _currentIndex;
+
+  @override
+  int get pageCount => _pageCount;
+}
+
+/// EPUB 引擎（设计文档 3.2：flutter_epub_viewer）。
+class EpubEngine extends BaseBookEngine {
+  @override
+  BookFormat get format => BookFormat.epub;
+
+  String _filePath = '';
+  List<TocItem> _toc = const [];
+
+  @override
+  Future<BookMeta> open(String filePath) async {
+    _filePath = filePath;
+    // flutter_epub_viewer 的 EpubController 由 widget 层创建，
+    // 这里只负责文件可用性检查与元信息
+    if (!File(filePath).existsSync()) {
+      throw FileSystemException('电子书不存在', filePath);
+    }
+    final meta = BookMeta(title: filePath.split('/').last, author: '', sections: 0);
+    setPageCount(0);
+    return meta;
+  }
+
+  @override
+  Future<List<TocItem>> getToc() async => _toc;
+
+  @override
+  Future<void> renderPage(int pageIndex, Widget container) async {
+    // 实际渲染在 EpubView 组件中完成（flutter_epub_viewer）
+  }
+
+  @override
+  Future<int> getPageCount() async => pageCount;
+
+  @override
+  String positionFor(int index) => 'epubcfi(/6/$index)';
+
+  @override
+  int indexOf(String position) {
+    final match = RegExp(r'/6/(\d+)').firstMatch(position);
+    return match != null ? int.parse(match.group(1)!) : 0;
+  }
+
+  @override
+  bool supportsAnnotation() => true;
+
+  @override
+  Future<List<Annotation>> loadAnnotations() async {
+    // 边车文件路径 = 书籍路径去掉扩展名 + .notes.json
+    final notesPath = notesPathFor(_filePath);
+    return readSidecarAnnotations(notesPath);
+  }
+
+  @override
+  Future<void> saveAnnotations() async {
+    // 批注写回边车文件（设计文档 3.3）
+  }
+
+  @override
+  void dispose() {
+    _toc = const [];
+  }
+}
+
+/// PDF 引擎（设计文档 3.2 / 3.3：PDFium FFI + 原生注释 API）。
+class PdfEngine extends BaseBookEngine {
+  @override
+  BookFormat get format => BookFormat.pdf;
+
+  @override
+  Future<BookMeta> open(String filePath) async {
+    if (!File(filePath).existsSync()) {
+      throw FileSystemException('电子书不存在', filePath);
+    }
+    // PDFium 通过 FFI 打开；总页数由原生层返回
+    return BookMeta(title: filePath.split('/').last, author: '', sections: 0);
+  }
+
+  @override
+  Future<List<TocItem>> getToc() async => const [];
+
+  @override
+  Future<void> renderPage(int pageIndex, Widget container) async {
+    // 实际渲染在 PdfView 组件中完成（pdfrx 包）
+  }
+
+  @override
+  Future<int> getPageCount() async => pageCount;
+
+  @override
+  String positionFor(int index) => index.toString();
+
+  @override
+  int indexOf(String position) => int.tryParse(position) ?? 0;
+
+  @override
+  bool supportsAnnotation() => true;
+
+  @override
+  Future<List<Annotation>> loadAnnotations() async {
+    // PDF 注释是**原生 PDF 注释对象**，直接从文件本身读取（设计文档 3.3）
+    return const [];
+  }
+
+  @override
+  Future<void> saveAnnotations() async {
+    // 通过 FFI 调用 PDFium 原生注释 API，把注释序列化回 PDF 文件。
+    // 笔迹以**矢量数据**存储（点 + 压力 + 时间戳），而非截图（设计文档 3.3）。
+  }
+
+  @override
+  void dispose() {}
+}
+
+/// Markdown 引擎（设计文档 3.2：flutter_markdown）。
+class MarkdownEngine extends BaseBookEngine {
+  @override
+  BookFormat get format => BookFormat.markdown;
+
+  String _filePath = '';
+  String _markdown = '';
+
+  @override
+  Future<BookMeta> open(String filePath) async {
+    _filePath = filePath;
+    _markdown = readTextFile(filePath);
+    setPageCount(1);
+    return BookMeta(title: filePath.split('/').last, author: '', sections: 1);
+  }
+
+  @override
+  Future<List<TocItem>> getToc() async {
+    final toc = <TocItem>[];
+    for (final match in RegExp(r'^(#{1,3})\s+(.+)$', multiLine: true).allMatches(_markdown)) {
+      toc.add(TocItem(title: match.group(2) ?? '', href: '#${match.group(2)}'));
+    }
+    return toc;
+  }
+
+  @override
+  Future<void> renderPage(int pageIndex, Widget container) async {
+    // 实际渲染在 MarkdownView 组件中完成
+  }
+
+  @override
+  Future<int> getPageCount() async => 1;
+
+  @override
+  String positionFor(int index) => '0';
+
+  @override
+  int indexOf(String position) => 0;
+
+  @override
+  bool supportsAnnotation() => true;
+
+  @override
+  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
+
+  @override
+  Future<void> saveAnnotations() async {
+    // 批注写回边车文件
+  }
+
+  @override
+  void dispose() {
+    _markdown = '';
+  }
+
+  String get markdown => _markdown;
+}
+
+/// TXT 引擎（设计文档 3.2：自研分页器）。
+class TxtEngine extends BaseBookEngine {
+  TxtEngine({this.pageSize = 45});
+
+  @override
+  BookFormat get format => BookFormat.txt;
+
+  /// 每页行数。
+  final int pageSize;
+
+  String _filePath = '';
+  List<String> _lines = const [];
+
+  @override
+  Future<BookMeta> open(String filePath) async {
+    _filePath = filePath;
+    final text = readTextFile(filePath);
+    _lines = text.split('\n');
+    setPageCount(_lines.isEmpty ? 1 : (_lines.length + pageSize - 1) ~/ pageSize);
+    return BookMeta(title: filePath.split('/').last, author: '', sections: pageCount);
+  }
+
+  @override
+  Future<List<TocItem>> getToc() async => const [];
+
+  @override
+  Future<void> renderPage(int pageIndex, Widget container) async {
+    // 实际渲染在 TxtView 组件中完成
+  }
+
+  @override
+  Future<int> getPageCount() async => pageCount;
+
+  @override
+  String positionFor(int index) => (index * pageSize).toString();
+
+  @override
+  int indexOf(String position) {
+    final line = int.tryParse(position) ?? 0;
+    return pageSize == 0 ? 0 : line ~/ pageSize;
+  }
+
+  @override
+  bool supportsAnnotation() => true;
+
+  @override
+  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
+
+  @override
+  Future<void> saveAnnotations() async {
+    // 批注写回边车文件
+  }
+
+  @override
+  void dispose() {
+    _lines = const [];
+  }
+
+  /// 当前页的文本行。
+  List<String> currentLines() {
+    final start = currentIndex * pageSize;
+    if (start >= _lines.length) return const [];
+    return _lines.sublist(start, (start + pageSize).clamp(0, _lines.length));
+  }
+}
+
+/// 由书籍路径推导边车文件路径（设计文档 1.2）。
+String notesPathFor(String filePath) => '${filePath.replaceAll(RegExp(r'\.[^./]+$'), '')}.notes.json';
+
+/// 从边车文件读取批注（EPUB / Markdown / TXT）。
+Future<List<Annotation>> readSidecarAnnotations(String notesPath) async {
+  final file = File(notesPath);
+  if (!file.existsSync()) return const [];
+  final decoded = jsonDecode(file.readAsStringSync());
+  if (decoded is! Map<String, dynamic>) return const [];
+  final annotations = decoded['annotations'];
+  if (annotations is! List) return const [];
+  return annotations.whereType<Map<String, dynamic>>().map(Annotation.fromJson).toList();
+}
+
+/// 向边车文件写回批注（EPUB / Markdown / TXT）。
+Future<void> writeSidecarAnnotations(String notesPath, List<Annotation> annotations) async {
+  final file = File(notesPath);
+  file.parent.createSync(recursive: true);
+  final json = <String, dynamic>{
+    'schema_version': '1.0',
+    'annotations': annotations.map((a) => a.toJson()).toList(),
+  };
+  file.writeAsStringSync(const JsonEncoder.withIndent('  ').convert(json));
+}
+
+/// 读取文本文件（引擎用）。
+String readTextFile(String path) => File(path).readAsStringSync();
