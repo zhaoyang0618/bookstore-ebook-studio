@@ -75,6 +75,27 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
+
+      # pdfrx 在 Windows 上强制要求「开发者模式」——它用符号链接指向 PDFium 库，
+      # 而 GitHub Actions 的 windows-latest 默认未开启该模式，CMake 会直接 FATAL_ERROR。
+      # 这里通过注册表开启（runner 有管理员权限），随后重启资源管理器无效但符号链接权限即刻生效。
+      - name: 启用 Windows 开发者模式（pdfrx 构建要求）
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+          New-ItemProperty -Path $key -Name AllowDevelopmentWithoutDevLicense `
+            -Value 1 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $key -Name AllowAllTrustedApps `
+            -Value 1 -PropertyType DWord -Force | Out-Null
+          Get-ItemProperty -Path $key | Format-List
+          # 验证符号链接能力
+          $t = Join-Path $env:TEMP "symlink-test"
+          Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
+          New-Item -ItemType SymbolicLink -Path $t -Target $env:TEMP -ErrorAction Stop | Out-Null
+          Remove-Item -Force $t
+          Write-Host "符号链接验证通过"
+
       - name: 构建 Windows（Release）
         run: flutter build windows --release
       - name: 打包 zip
