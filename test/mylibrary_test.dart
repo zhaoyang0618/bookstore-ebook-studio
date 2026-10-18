@@ -131,10 +131,10 @@ void main() {
 
     test('reading_position 按 updated_at 取最新', () {
       final local = makeLibrary(books: [
-        makeBook(readingPosition: ReadingPosition(position: 'p-local', percentage: 0.2, updatedAt: '2026-10-16T08:30:00Z', updatedBy: 'local'))
+        makeBook(readingPosition: const ReadingPosition(position: 'p-local', percentage: 0.2, updatedAt: '2026-10-16T08:30:00Z', updatedBy: 'local'))
       ]);
       final remote = makeLibrary(
-        books: [makeBook(readingPosition: ReadingPosition(position: 'p-remote', percentage: 0.8, updatedAt: '2026-10-16T11:00:00Z', updatedBy: 'remote'))],
+        books: [makeBook(readingPosition: const ReadingPosition(position: 'p-remote', percentage: 0.8, updatedAt: '2026-10-16T11:00:00Z', updatedBy: 'remote'))],
         version: 5,
       );
       expect(mergeLibraries(local, remote).value.books.first.readingPosition?.position, 'p-remote');
@@ -334,10 +334,10 @@ void main() {
 
     test('笔记边车读写', () {
       final book = store.addBook(makeBook());
-      final annotation = Annotation(
+      final annotation = const Annotation(
         id: 'anno-1',
         type: 'highlight',
-        anchor: const {'type': 'epubcfi', 'value': 'epubcfi(/6/4[chap01]!/4/2/2)'},
+        anchor: {'type': 'epubcfi', 'value': 'epubcfi(/6/4[chap01]!/4/2/2)'},
         text: '给岁月以文明',
         createdAt: '2026-10-15T09:00:00Z',
         updatedAt: '2026-10-16T09:00:00Z',
@@ -378,7 +378,7 @@ void main() {
 
     test('录课视频元数据读写', () {
       store.addBook(makeBook());
-      store.writeRecording(Recording(
+      store.writeRecording(const Recording(
         id: 'rec-1',
         bookId: 'uuid-1',
         title: '黑暗森林法则讲解',
@@ -425,7 +425,7 @@ void main() {
   group('JSON 序列化往返', () {
     test('Library 往返一致', () {
       final library = makeLibrary(books: [
-        makeBook(tags: ['科幻'], readingPosition: ReadingPosition(position: 'p', percentage: 0.5, updatedAt: '2026-10-16T10:00:00Z', updatedBy: 'ipad'))
+        makeBook(tags: ['科幻'], readingPosition: const ReadingPosition(position: 'p', percentage: 0.5, updatedAt: '2026-10-16T10:00:00Z', updatedBy: 'ipad'))
       ]);
       final json = jsonDecode(encodeLibrary(library)) as Map<String, dynamic>;
       final round = Library.fromJson(json);
@@ -436,12 +436,12 @@ void main() {
     });
 
     test('Manifest 往返一致', () {
-      final manifest = Manifest(
+      final manifest = const Manifest(
         schemaVersion: '1.0',
         libraryVersion: 42,
         updatedAt: '2026-10-16T10:30:00Z',
         updatedBy: 'mac',
-        clients: const [
+        clients: [
           ManifestClient(id: 'mac', type: ClientType.dshExtension, platform: ClientPlatform.macos, lastSeen: '2026-10-16T10:30:00Z'),
         ],
       );

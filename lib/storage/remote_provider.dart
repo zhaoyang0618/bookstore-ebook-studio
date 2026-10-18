@@ -384,7 +384,7 @@ class BaiduProvider implements RemoteProvider {
     }
     final createResult = jsonDecode(createResponse.body) as Map<String, dynamic>;
     if (createResult['return_type'] == 1) {
-      throw HttpException('百度网盘 create 合并失败');
+      throw const HttpException('百度网盘 create 合并失败');
     }
   }
 

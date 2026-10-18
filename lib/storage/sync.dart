@@ -284,7 +284,7 @@ class DeletePlan {
             file: 'trash',
             description: '删除书籍：删除元数据，文件移到 .trash/（彻底删除）',
           ),
-        DeleteOperation.deleteLocalOnly => DeletePlan(
+        DeleteOperation.deleteLocalOnly => const DeletePlan(
             operation: DeleteOperation.deleteLocalOnly,
             metadata: 'keep',
             file: 'delete',
