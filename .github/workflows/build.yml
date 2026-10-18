@@ -36,7 +36,11 @@ jobs:
   # ---------- 诊断：验证 runner 能否构建任意 Flutter Windows 应用 ----------
   diagnostic-windows:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    # 必须用 2022 而非 latest：windows-latest 已升级到 Visual Studio 18，
+    # 而 Flutter 3.35.5 的生成器映射只有 17 => 'VS 17 2022'，
+    # VS 18 会落到默认分支 'VS 16 2019'，CMake 报
+    # "Generator Visual Studio 16 2019 could not find any instance"
+    runs-on: windows-2022
     steps:
       - uses: subosito/flutter-action@v2
         with:
@@ -91,7 +95,11 @@ jobs:
     if: >-
       github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.build_targets, 'windows')
-    runs-on: windows-latest
+    # 必须用 2022 而非 latest：windows-latest 已升级到 Visual Studio 18，
+    # 而 Flutter 3.35.5 的生成器映射只有 17 => 'VS 17 2022'，
+    # VS 18 会落到默认分支 'VS 16 2019'，CMake 报
+    # "Generator Visual Studio 16 2019 could not find any instance"
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
