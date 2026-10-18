@@ -12,7 +12,7 @@ on:
       build_targets:
         description: '构建目标（空格分隔：macos windows linux android ios）'
         required: false
-        default: 'macos windows linux'
+        default: 'macos windows linux android ios'
 
 jobs:
   # ---------- 先跑静态检查与测试，失败就不浪费各平台构建时间 ----------
@@ -214,7 +214,7 @@ jobs:
   build-android:
     needs: check
     if: >-
-      github.event_name == 'workflow_dispatch' &&
+      github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.build_targets, 'android')
     runs-on: ubuntu-latest
     steps:
@@ -241,7 +241,7 @@ jobs:
   build-ios:
     needs: check
     if: >-
-      github.event_name == 'workflow_dispatch' &&
+      github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.build_targets, 'ios')
     runs-on: macos-14
     steps:
