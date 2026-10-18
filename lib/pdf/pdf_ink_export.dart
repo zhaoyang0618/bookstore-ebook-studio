@@ -165,19 +165,60 @@ class InkExportResult {
     // /Rect 需要把线宽与线端一并算进去，否则粗线会被裁掉
     bounds.expand(width / 2 + 1);
 
+    final rect = [
+      _round(bounds.left),
+      _round(bounds.bottom),
+      _round(bounds.right),
+      _round(bounds.top),
+    ];
+
+    // ---- 外观流（/AP）----
+    //
+    // 为什么必须有它：**macOS 预览（PDFKit）不会自己合成墨迹外观**，
+    // 只认 /AP；没有 /AP 时墨迹在预览里完全看不见。
+    // PDF.js / Chrome / Acrobat 能读 /InkList 自己画，所以只在预览上暴露问题。
+    // 加上 /AP 对它们也只是改成用同一份外观，行为一致。
+    final apNumber = writer.addStream(
+      PdfDict({
+        'Type': const PdfName('XObject'),
+        'Subtype': const PdfName('Form'),
+        'FormType': const PdfNumber(1),
+        // BBox 用页面的绝对坐标（Matrix 保持单位阵），
+        // 这样外观流里的坐标与 /InkList 完全一致，便于对照排查。
+        'BBox': PdfArray(rect.map((v) => PdfNumber(v)).toList()),
+        'Resources': PdfDict({
+          if (annotation.color.a < 1)
+            'ExtGState': PdfDict({
+              'GS0': PdfDict({
+                'CA': PdfNumber(annotation.color.a),
+                'BM': const PdfName('Multiply'),
+              }),
+            }),
+        }),
+      }),
+      _appearanceContent(
+        strokes: inkList,
+        color: color,
+        width: width,
+        alpha: annotation.color.a,
+      ),
+    );
+
     final annotNumber = writer.allocate();
     final annotDict = PdfDict({
       'Type': const PdfName('Annot'),
       'Subtype': const PdfName('Ink'),
-      'Rect': PdfArray([
-        PdfNumber(_round(bounds.left)),
-        PdfNumber(_round(bounds.bottom)),
-        PdfNumber(_round(bounds.right)),
-        PdfNumber(_round(bounds.top)),
-      ]),
+      'Rect': PdfArray(rect.map((v) => PdfNumber(v)).toList()),
       'InkList': PdfArray(inkList),
       'C': PdfArray(color.map((c) => PdfNumber(c)).toList()),
       'Border': PdfArray([const PdfNumber(0), const PdfNumber(0), PdfNumber(_round(width))]),
+      // /BS 是 /Border 的现代替代写法，部分阅读器（含 Preview）更认它
+      'BS': PdfDict({
+        'Type': const PdfName('Border'),
+        'W': PdfNumber(_round(width)),
+        'S': const PdfName('S'),
+      }),
+      'AP': PdfDict({'N': PdfRef(apNumber)}),
       'F': const PdfNumber(4), // Print
       'T': PdfString.utf16(author),
       'NM': PdfString.utf16(annotation.id),
@@ -384,6 +425,44 @@ Future<InkExportResult> writeInkIntoPdf({
       backupDir: backupDir,
       now: now,
     );
+
+/// 生成外观流的内容（PDF 内容流语法）。
+///
+/// [strokes] 是已经转成 PDF 坐标的 `/InkList` 结构。
+/// 坐标直接用页面绝对坐标，与 `/InkList` 一致。
+List<int> _appearanceContent({
+  required List<PdfObject> strokes,
+  required List<double> color,
+  required double width,
+  required double alpha,
+}) {
+  final buffer = StringBuffer();
+  buffer.writeln('q');
+  if (alpha < 1) buffer.writeln('/GS0 gs');
+  buffer.writeln('${_n(color[0])} ${_n(color[1])} ${_n(color[2])} RG');
+  buffer.writeln('${_n(width)} w');
+  buffer.writeln('1 J'); // 圆头
+  buffer.writeln('1 j'); // 圆角连接
+
+  for (final stroke in strokes) {
+    if (stroke is! PdfArray || stroke.items.length < 4) continue;
+    final numbers = stroke.items.whereType<PdfNumber>().map((n) => n.value.toDouble()).toList();
+    if (numbers.length < 4) continue;
+    buffer.write('${_n(numbers[0])} ${_n(numbers[1])} m\n');
+    for (var i = 2; i + 1 < numbers.length; i += 2) {
+      buffer.write('${_n(numbers[i])} ${_n(numbers[i + 1])} l\n');
+    }
+    buffer.writeln('S');
+  }
+  buffer.writeln('Q');
+  return buffer.toString().codeUnits;
+}
+
+/// 紧凑的数字格式（PDF 内容流用）。
+String _n(double value) {
+  if (value == value.roundToDouble()) return value.toInt().toString();
+  return value.toStringAsFixed(2).replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
+}
 
 /// 一条待导出的批注。
 class InkAnnotationInput {

@@ -129,9 +129,30 @@ flutter analyze             # 静态检查
 处理的难点：`2.pdf`（LaTeX 生成，PDF 1.7）的页面对象**全部压缩在对象流里**，
 且用 xref 流而非经典表，MediaBox 还要从 4 层祖先继承。
 
+### 为什么要写 `/AP` 外观流
+
+**macOS 预览（PDFKit）不会自己合成墨迹外观** —— 它只认注释里的 `/AP`
+外观流；没有 `/AP` 时墨迹在预览里完全不可见。
+而 PDF.js / Chrome / Acrobat 能读 `/InkList` 自己画，所以这个缺陷
+**只在预览上暴露**。
+
+因此每个墨迹注释除了 `/InkList`，还会生成一个 Form XObject 作为 `/AP`：
+
+```
+/AP << /N <表单 XObject> >>
+表单内容：q / 颜色 RG / 线宽 w / 路径 m-l / S / Q
+```
+
+半透明笔（荧光笔）额外带 `ExtGState`（`/CA` 透明度 + `/BM /Multiply`），
+保证在其它阅读器里也是「文字能透出来」的效果。
+
+> 注意：预览对墨迹注释的支持本身较弱（[pypdf#2332](https://github.com/py-pdf/pypdf/issues/2332)
+> 报告过即使带 `/AP` 也可能显示异常）。若预览仍不显示，
+> 可用 Chrome 或 dsh 版（PDF.js）验证 —— 它们一定能看到。
+
 ### 验证
 
-18 个单元测试 + 外部工具双重验证：
+27 个单元测试 + 外部工具双重验证：
 
 ```
 pdfinfo  → Pages: 338        （结构完好，无语法错误）

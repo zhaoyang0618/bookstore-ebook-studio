@@ -107,13 +107,21 @@ class PdfFileReader {
 
   /// 取字典项并解引用。
   ///
-  /// [object] 可以是字典，也可以是**指向字典的引用**（例如 trailer 的
-  /// `/Root`）—— 内部会先解引用，避免调用方到处写 `deref`。
+  /// [object] 可以是字典、**指向字典的引用**（例如 trailer 的 `/Root`），
+  /// 也可以是**流对象**（流的字典在 `PdfStream.dict` 里）——
+  /// 内部统一归一化成字典，避免调用方到处写 `deref` 与类型判断。
   PdfObject? dictGet(PdfObject? object, String key) {
-    final dict = deref(object);
-    if (dict is! PdfDict) return null;
+    final dict = _asDict(deref(object));
+    if (dict == null) return null;
     return deref(dict[key]);
   }
+
+  /// 把对象归一化成字典：字典本身，或流对象的字典。
+  static PdfDict? _asDict(PdfObject? object) => switch (object) {
+        PdfDict() => object,
+        PdfStream(:final dict) => dict,
+        _ => null,
+      };
 
   /// 取数字项（可继承）。
   num? dictGetNumber(PdfObject? dict, String key) {

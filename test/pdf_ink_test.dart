@@ -587,4 +587,95 @@ void main() {
       );
     });
   });
+
+  group('外观流 /AP（macOS 预览必需）', () {
+    test('墨迹注释带 /AP 外观流', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_ap');
+      final src = File('${dir.path}/in.pdf')..writeAsBytesSync(buildClassicPdf());
+      final out = '${dir.path}/out.pdf';
+
+      exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'ink-ap',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(20, 30), const Offset(80, 90)])],
+          ),
+        ],
+      );
+
+      final reader = PdfFileReader.fromBytes(File(out).readAsBytesSync());
+      final page = reader.resolve(reader.collectPages().first) as PdfDict;
+      final annots = reader.dictGet(page, 'Annots') as PdfArray;
+      final annot = reader.deref(annots.items.last) as PdfDict;
+
+      // /AP << /N <ref> >>
+      final ap = annot['AP'];
+      expect(ap, isA<PdfDict>());
+      final n = (ap as PdfDict)['N'];
+      expect(n, isA<PdfRef>());
+
+      // 外观流是合法的 Form XObject，且 BBox 与 Rect 一致
+      final form = reader.resolve(n as PdfRef);
+      expect(form, isA<PdfStream>());
+      final formStream = form as PdfStream;
+      expect((formStream.dict['Subtype'] as PdfName).name, 'Form');
+      expect(formStream.dict['BBox'], isA<PdfArray>());
+      expect(
+        reader.dictGetNumber(formStream, 'FormType'),
+        1,
+      );
+
+      // 内容流里有描边指令与颜色
+      final content = String.fromCharCodes(formStream.raw);
+      expect(content, contains(' RG')); // 描边颜色
+      expect(content, contains(' w\n')); // 线宽
+      expect(content, contains(' m\n')); // moveto
+      expect(content, contains(' l\n')); // lineto
+      expect(content, contains('S\n')); // stroke
+
+      // /BS 也写上了（部分阅读器更认它）
+      expect(annot['BS'], isA<PdfDict>());
+    });
+
+    test('半透明笔（荧光笔）的外观流带 ExtGState 与 multiply', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_ap_hl');
+      final src = File('${dir.path}/in.pdf')..writeAsBytesSync(buildClassicPdf());
+      final out = '${dir.path}/out.pdf';
+
+      exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'hl',
+            color: const Color(0x59FDD835), // 35% 黄
+            strokes: [strokeAt([const Offset(10, 10), const Offset(90, 10)], width: 18)],
+          ),
+        ],
+      );
+
+      final reader = PdfFileReader.fromBytes(File(out).readAsBytesSync());
+      final page = reader.resolve(reader.collectPages().first) as PdfDict;
+      final annots = reader.dictGet(page, 'Annots') as PdfArray;
+      final annot = reader.deref(annots.items.last) as PdfDict;
+      final form = reader.resolve((annot['AP'] as PdfDict)['N'] as PdfRef) as PdfStream;
+
+      // ExtGState 在 /Resources 下，不是表单字典的直接项
+      final resources = reader.dictGet(form, 'Resources');
+      expect(resources, isA<PdfDict>());
+      final extG = reader.dictGet(resources, 'ExtGState');
+      expect(extG, isA<PdfDict>());
+      final gs0 = (extG as PdfDict)['GS0'] as PdfDict;
+      expect((gs0['BM'] as PdfName).name, 'Multiply');
+      expect((gs0['CA'] as PdfNumber).value, closeTo(0.35, 0.01));
+
+      final content = String.fromCharCodes(form.raw);
+      expect(content, contains('/GS0 gs'));
+    });
+  });
 }
