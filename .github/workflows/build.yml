@@ -32,6 +32,29 @@ jobs:
       - name: 单元测试
         run: flutter test --no-pub
 
+
+  # ---------- 诊断：验证 runner 能否构建任意 Flutter Windows 应用 ----------
+  diagnostic-windows:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.5'
+          channel: stable
+          cache: true
+      - name: 构建官方模板（排除我们代码的问题）
+        shell: pwsh
+        run: |
+          flutter create --platforms=windows diag_app
+          cd diag_app
+          flutter build windows --release 2>&1 | Tee-Object -FilePath ..\diag.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content ..\diag.log -Tail 40 | ForEach-Object { Write-Host "::error::$_" }
+            exit $LASTEXITCODE
+          }
+          Write-Host "官方模板构建成功"
+
   # ---------- macOS ----------
   build-macos:
     needs: check
@@ -101,8 +124,14 @@ jobs:
         run: |
           flutter build windows --release --verbose 2>&1 | Tee-Object -FilePath build-windows.log
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "=== 构建失败，尾部日志 ==="
-            Get-Content build-windows.log -Tail 100
+            Write-Host "=== 构建失败，过滤关键错误行 ==="
+            $lines = Get-Content build-windows.log
+            # 用 GitHub 注解语法输出，运行摘要公开可读
+            $lines | Select-String -Pattern 'error|Error|ERROR|FAILED|fatal|Fatal|exception|Exception|not found|Cannot' | Select-Object -First 40 | ForEach-Object {
+              Write-Host "::error::$($_.Line.Trim())"
+            }
+            Write-Host "=== 最后 30 行 ==="
+            $lines | Select-Object -Last 30 | ForEach-Object { Write-Host "::error::$_" }
             exit $LASTEXITCODE
           }
 
