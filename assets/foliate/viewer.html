@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>EPUB Viewer</title>
+<style>
+  :root { color-scheme: light; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #f7f6f3;
+    font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+  }
+  foliate-view { display: block; width: 100%; height: 100%; }
+
+  /* 加载中 */
+  #loading {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    color: #6b7280; font-size: 14px; background: #f7f6f3; z-index: 5;
+  }
+  #loading.hide { display: none; }
+
+  /* 错误面板：把失败原因直接显示出来，便于远程诊断 */
+  #error {
+    position: fixed; inset: 0; display: none; padding: 24px;
+    overflow: auto; white-space: pre-wrap; word-break: break-word;
+    background: #fff5f5; color: #7f1d1d; font-size: 13px; line-height: 1.7; z-index: 9;
+  }
+  #error.show { display: block; }
+  #error h2 { margin: 0 0 12px; font-size: 15px; }
+  #error pre { margin: 12px 0 0; font-size: 12px; opacity: .8; }
+
+  /* 进度条 */
+  #progress {
+    position: fixed; left: 0; bottom: 0; height: 2px; width: 0;
+    background: #2563eb; transition: width .2s ease; z-index: 6;
+  }
+</style>
+</head>
+<body>
+<div id="loading">正在打开电子书…</div>
+<div id="error"></div>
+<div id="progress"></div>
+
+<script type="module">
+import { makeBook } from './view.js';
+
+const loadingEl = document.getElementById('loading');
+const errorEl = document.getElementById('error');
+const progressEl = document.getElementById('progress');
+
+let view = null;
+let lastCfi = null;
+let fraction = 0;
+let bookTitle = null;
+
+/** 把事件回传给 Flutter。注入失败时静默忽略（独立在浏览器里打开调试时用）。 */
+function notify(type, payload = {}) {
+  try {
+    const handler = window.flutter_inappwebview && window.flutter_inappwebview.callHandler;
+    if (typeof handler === 'function') {
+      handler('epubEvent', JSON.stringify({ type, ...payload }));
+    }
+  } catch (_) {
+    /* 忽略：可能不在 WebView 环境中 */
+  }
+  // 同时写入 console，便于用 devtools 观察
+  try { console.log('[epub]', type, payload); } catch (_) {}
+}
+
+function showError(message, stack) {
+  loadingEl.classList.add('hide');
+  errorEl.innerHTML = '';
+  const h = document.createElement('h2');
+  h.textContent = '电子书打开失败';
+  errorEl.appendChild(h);
+  const p = document.createElement('div');
+  p.textContent = String(message);
+  errorEl.appendChild(p);
+  if (stack) {
+    const pre = document.createElement('pre');
+    pre.textContent = String(stack);
+    errorEl.appendChild(pre);
+  }
+  errorEl.classList.add('show');
+  notify('error', { message: String(message) });
+}
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * 打开一本电子书。
+ * @param {string} base64 EPUB 文件字节的 base64
+ * @param {string} [initialCfi] 上次阅读位置（epubcfi），用于续读
+ */
+async function openBase64(base64, initialCfi) {
+  loadingEl.classList.remove('hide');
+  errorEl.classList.remove('show');
+  try {
+    if (!base64) throw new Error('未收到电子书数据');
+
+    const bytes = base64ToBytes(base64);
+    const file = new File([bytes], 'book.epub', { type: 'application/epub+zip' });
+
+    const book = await makeBook(file);
+    bookTitle = book.metadata && book.metadata.title ? book.metadata.title : null;
+
+    // 清理旧的视图（重开同一本书时）
+    if (view) {
+      try { view.close(); } catch (_) {}
+      view.remove();
+      view = null;
+    }
+
+    view = document.createElement('foliate-view');
+    document.body.appendChild(view);
+
+    view.addEventListener('relocate', (event) => {
+      const detail = event.detail || {};
+      if (detail.cfi) lastCfi = detail.cfi;
+      if (typeof detail.fraction === 'number') fraction = detail.fraction;
+      progressEl.style.width = `${Math.round(fraction * 100)}%`;
+      notify('relocate', {
+        cfi: lastCfi,
+        fraction,
+        tocLabel: detail.tocItem && detail.tocItem.label ? detail.tocItem.label : null,
+      });
+    });
+
+    await view.open(book);
+    // foliate 打开后还需要 init 才会渲染首屏
+    await view.init({ lastLocation: initialCfi || null, showTextStart: !initialCfi });
+    loadingEl.classList.add('hide');
+
+    notify('opened', {
+      title: bookTitle,
+      sections: Array.isArray(book.sections) ? book.sections.length : 0,
+      cfi: lastCfi,
+      fraction,
+    });
+  } catch (err) {
+    showError(err && err.message ? err.message : err, err && err.stack);
+  }
+}
+
+/** 让 Flutter 侧可以查询当前状态。 */
+function getState() {
+  return { cfi: lastCfi, fraction, title: bookTitle };
+}
+
+window.epubApi = {
+  openBase64,
+  getState,
+  next: () => { if (view) view.next(); },
+  prev: () => { if (view) view.prev(); },
+  goTo: (cfi) => { if (view) view.goTo(cfi); },
+  goToFraction: (f) => { if (view) view.goToFraction(f); },
+};
+
+// 通知 Flutter：脚本已就绪（避免过早注入数据）
+notify('bridge-ready', {});
+loadingEl.classList.add('hide');
+</script>
+</body>
+</html>

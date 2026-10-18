@@ -6,11 +6,13 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 
 import '../models/mylibrary_models.dart';
 import '../storage/my_library_store.dart';
+import 'epub_webview.dart';
 
 /// 目录项。
 class TocItem {
@@ -149,18 +151,44 @@ class EpubEngine extends BaseBookEngine {
   @override
   BookFormat get format => BookFormat.epub;
 
+  /// WebView + foliate-js 的控制器，由 EpubWebView widget 承载。
+  ///
+  /// 为什么引擎持有 controller 而不是自己渲染：
+  /// foliate-js 跑在 WebView 里，实际绘制由 widget 层完成，
+  /// 引擎负责读文件、读写边车、以及把翻页指令转发给 controller。
+  final EpubController controller = EpubController();
+
   String _filePath = '';
+  Uint8List? _bytes;
   List<TocItem> _toc = const [];
+
+  /// 已读取的原始字节，供 widget 注入 WebView。
+  Uint8List? get bytes => _bytes;
+
+  /// 上次阅读位置（epubcfi），用于打开时续读（设计文档 4.2「换设备续读」）。
+  String? lastKnownCfi;
+
+  /// 记录续读位置；打开前由上层从 library.json 的 reading_position 传入。
+  void setResumeCfi(String? cfi) {
+    lastKnownCfi = (cfi != null && cfi.isNotEmpty) ? cfi : null;
+  }
 
   @override
   Future<BookMeta> open(String filePath) async {
     _filePath = filePath;
-    // flutter_epub_viewer 的 EpubController 由 widget 层创建，
-    // 这里只负责文件可用性检查与元信息
-    if (!File(filePath).existsSync()) {
+    final file = File(filePath);
+    if (!file.existsSync()) {
       throw FileSystemException('电子书不存在', filePath);
     }
-    final meta = BookMeta(title: filePath.split('/').last, author: '', sections: 0);
+    _bytes = file.readAsBytesSync();
+
+    // foliate 打开后会通过 relocate 事件回报真实章节数，
+    // 这里先给一个占位值，open 完成后由 controller 更新。
+    final meta = BookMeta(
+      title: filePath.split('/').last,
+      author: '',
+      sections: 0,
+    );
     setPageCount(0);
     return meta;
   }
@@ -170,30 +198,42 @@ class EpubEngine extends BaseBookEngine {
 
   @override
   Future<void> renderPage(int pageIndex, Widget container) async {
-    // 实际渲染在 EpubView 组件中完成（flutter_epub_viewer）
+    // 真实渲染由 EpubWebView 完成（本引擎不直接绘制）
   }
 
   @override
   Future<int> getPageCount() async => pageCount;
 
+  /// foliate 走的是 CFI，位置由 controller 维护。
   @override
-  String positionFor(int index) => 'epubcfi(/6/$index)';
+  String positionFor(int index) => controller.location?.cfi ?? '';
 
   @override
-  int indexOf(String position) {
-    final match = RegExp(r'/6/(\d+)').firstMatch(position);
-    return match != null ? int.parse(match.group(1)!) : 0;
+  int indexOf(String position) => 0;
+
+  @override
+  ReaderPosition getCurrentPosition() => ReaderPosition(
+        position: controller.location?.cfi ?? '',
+        percentage: controller.location?.fraction ?? 0,
+      );
+
+  /// 翻页交给 controller（foliate 自己算分页）。
+  @override
+  Future<void> nextPage() async => controller.next();
+
+  @override
+  Future<void> prevPage() async => controller.prev();
+
+  @override
+  Future<void> goTo(String position) async {
+    if (position.isNotEmpty) await controller.goTo(position);
   }
 
   @override
   bool supportsAnnotation() => true;
 
   @override
-  Future<List<Annotation>> loadAnnotations() async {
-    // 边车文件路径 = 书籍路径去掉扩展名 + .notes.json
-    final notesPath = notesPathFor(_filePath);
-    return readSidecarAnnotations(notesPath);
-  }
+  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
 
   @override
   Future<void> saveAnnotations() async {
@@ -202,7 +242,9 @@ class EpubEngine extends BaseBookEngine {
 
   @override
   void dispose() {
+    controller.dispose();
     _toc = const [];
+    _bytes = null;
   }
 }
 

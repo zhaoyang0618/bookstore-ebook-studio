@@ -8,5 +8,10 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!-- 文件选择器读取用户选中的电子书 -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
 </dict>
 </plist>

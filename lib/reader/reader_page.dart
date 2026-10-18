@@ -1,6 +1,7 @@
 /// 阅读器界面（设计文档 3.3）。
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../engines/book_engine.dart';
+import '../engines/epub_webview.dart';
 import '../features/annotation/ink_canvas.dart';
 import '../features/annotation/annotation_panel.dart';
 import '../library/library_page.dart';
@@ -38,19 +40,35 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     super.dispose();
   }
 
-  Future<void> _open(Book book, String root) async {
+  /// 打开一本书。`root` 为 null 表示「独立文件」模式（不经 MyLibrary）。
+  Future<void> _open(Book book, String? root) async {
     _engine?.dispose();
     final engine = createEngine(book.format);
     _engine = engine;
-    final filePath = p.join(root, book.relativePath);
+    final filePath = root == null ? book.relativePath : p.join(root, book.relativePath);
     try {
       await engine.open(filePath);
       final annotations = await engine.loadAnnotations();
       ref.read(annotationsProvider.notifier).state = annotations;
-      // 恢复阅读位置（设计文档 4.2「换设备续读」）
-      final position = book.readingPosition?.position;
-      if (position != null && position.isNotEmpty) await engine.goTo(position);
+
+      // EPUB 走 foliate：续读位置通过 CFI 传给 WebView
+      if (engine is EpubEngine) {
+        engine.setResumeCfi(book.readingPosition?.position);
+      } else {
+        // 恢复阅读位置（设计文档 4.2「换设备续读」）
+        final position = book.readingPosition?.position;
+        if (position != null && position.isNotEmpty) await engine.goTo(position);
+      }
       ref.read(readingProgressProvider.notifier).state = engine.getCurrentPosition().percentage;
+
+      // EPUB 的进度由 foliate 的 relocate 事件驱动
+      if (engine is EpubEngine) {
+        engine.controller.onLocation.listen((location) {
+          if (!mounted) return;
+          ref.read(readingProgressProvider.notifier).state = location.fraction;
+          setState(() {});
+        });
+      }
     } on FileSystemException catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('打开失败：${error.message}')));
@@ -63,10 +81,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _savePosition(Book book, String root) async {
+  Future<void> _savePosition(Book book, String? root) async {
     final engine = _engine;
     if (engine == null) return;
     final position = engine.getCurrentPosition();
+    ref.read(readingProgressProvider.notifier).state = position.percentage;
+    // 独立文件没有 library.json 可写，进度只留在内存里
+    if (root == null) return;
     final store = MyLibraryStore(root, clientId: 'flutter-app-client');
     store.updateBook(book.id, (current) => Book(
           id: current.id,
@@ -97,12 +118,22 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
 
   @override
   Widget build(BuildContext context) {
-    final book = ref.watch(selectedBookProvider);
+    final libraryBook = ref.watch(selectedBookProvider);
     final root = ref.watch(libraryRootProvider);
+    final standalonePath = ref.watch(standaloneFileProvider);
     final progress = ref.watch(readingProgressProvider);
     final annotations = ref.watch(annotationsProvider);
 
-    if (book == null || root == null) {
+    // 独立文件优先：用户刚用「直接打开一本书」选的
+    final Book? book = standalonePath != null
+        ? _bookFromStandalonePath(standalonePath)
+        : libraryBook;
+
+    if (book == null) {
+      return const Scaffold(body: Center(child: Text('从图书馆选择一本书，或用「直接打开一本书」选择文件')));
+    }
+    final effectiveRoot = standalonePath != null ? null : root;
+    if (standalonePath == null && effectiveRoot == null) {
       return const Scaffold(body: Center(child: Text('从图书馆选择一本书开始阅读')));
     }
 
@@ -133,7 +164,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                   child: _EngineView(
                     engine: _engine,
                     book: book,
-                    onOpen: () => _open(book, root),
+                    onOpen: () => _open(book, effectiveRoot),
                   ),
                 ),
                 // 手写标注层（设计文档 3.3：矢量笔迹）
@@ -167,7 +198,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               OutlinedButton.icon(
                 onPressed: () async {
                   await _engine?.prevPage();
-                  await _savePosition(book, root);
+                  await _savePosition(book, effectiveRoot);
                   setState(() {});
                 },
                 icon: const Icon(Icons.chevron_left),
@@ -177,7 +208,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               FilledButton.icon(
                 onPressed: () async {
                   await _engine?.nextPage();
-                  await _savePosition(book, root);
+                  await _savePosition(book, effectiveRoot);
                   setState(() {});
                 },
                 icon: const Icon(Icons.chevron_right),
@@ -187,6 +218,35 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           ),
         ),
       ),
+    );
+  }
+
+  /// 由独立文件路径构造一个临时 Book（不写入 library.json）。
+  Book _bookFromStandalonePath(String path) {
+    final name = p.basename(path);
+    final ext = p.extension(path).replaceFirst('.', '').toLowerCase();
+    final format = switch (ext) {
+      'epub' => BookFormat.epub,
+      'pdf' => BookFormat.pdf,
+      'md' || 'markdown' => BookFormat.markdown,
+      _ => BookFormat.txt,
+    };
+    return Book(
+      id: 'standalone:$path',
+      title: p.basenameWithoutExtension(path),
+      author: name,
+      format: format,
+      relativePath: path,
+      sizeBytes: 0,
+      addedAt: DateTime.now().toUtc().toIso8601String(),
+      syncState: const BookSyncState(
+        metadata: SyncState.localOnly,
+        cover: SyncState.missing,
+        notes: SyncState.localOnly,
+        file: SyncState.localOnly,
+        recordings: SyncState.missing,
+      ),
+      heldBy: const [],
     );
   }
 
@@ -226,6 +286,12 @@ class _EngineViewState extends State<_EngineView> {
     if (engine == null) {
       return const Center(child: CircularProgressIndicator());
     }
+
+    // EPUB 由 foliate-js 在 WebView 里渲染
+    if (engine is EpubEngine) {
+      return _EpubSurface(engine: engine);
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -245,12 +311,86 @@ class _EngineViewState extends State<_EngineView> {
     );
   }
 
-  /// 各格式的正文文本（PDF / EPUB 的真实渲染在各自的 widget 组件中完成）。
+  /// 各格式的正文文本（PDF 的真实渲染在 PdfView 组件中完成）。
   String _engineBody(BookEngine engine) => switch (engine) {
         TxtEngine() => engine.currentLines().join('\n'),
         MarkdownEngine() => engine.markdown,
         PdfEngine() => '[PDF 渲染区：pdfrx / PDFium FFI]\n\n第 ${engine.currentIndex + 1} 页',
-        EpubEngine() => '[EPUB 渲染区：flutter_epub_viewer]\n\n当前章节 ${engine.currentIndex + 1}',
         _ => '不支持的格式',
       };
+}
+
+/// EPUB 渲染面：把引擎读到的字节注入 WebView，并显示加载/错误状态。
+class _EpubSurface extends StatefulWidget {
+  const _EpubSurface({required this.engine});
+
+  final EpubEngine engine;
+
+  @override
+  State<_EpubSurface> createState() => _EpubSurfaceState();
+}
+
+class _EpubSurfaceState extends State<_EpubSurface> {
+  bool _injected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 桥就绪后再注入；同时监听错误
+    widget.engine.controller.addListener(_onControllerChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.engine.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  void _onControllerChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 桥就绪且拿到字节后注入一次。
+  void _maybeInject() {
+    if (_injected) return;
+    final controller = widget.engine.controller;
+    final bytes = widget.engine.bytes;
+    if (!controller.bridgeReady || bytes == null) return;
+    _injected = true;
+    final cfi = widget.engine.lastKnownCfi;
+    unawaited(controller.openBytes(bytes, initialCfi: cfi));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = widget.engine.controller;
+    _maybeInject();
+
+    return Stack(
+      children: [
+        Positioned.fill(child: EpubWebView(controller: controller)),
+        // 错误面板：把 WebView 里的失败原因显示出来，便于诊断
+        if (controller.state == EpubBridgeState.failed && controller.lastError != null)
+          Positioned.fill(
+            child: Container(
+              color: const Color(0xFFFFF5F5),
+              padding: const EdgeInsets.all(24),
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  '电子书打开失败\n\n${controller.lastError}',
+                  style: const TextStyle(color: Color(0xFF7F1D1D), fontSize: 13, height: 1.7),
+                ),
+              ),
+            ),
+          ),
+        if (controller.state == EpubBridgeState.loading)
+          const Positioned.fill(
+            child: ColoredBox(
+              color: Color(0xFFF7F6F3),
+              child: Center(child: Text('正在打开电子书…')),
+            ),
+          ),
+      ],
+    );
+  }
 }

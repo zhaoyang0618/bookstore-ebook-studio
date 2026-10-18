@@ -3,6 +3,7 @@ library;
 
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
@@ -21,6 +22,24 @@ final libraryProvider = StateProvider<Library?>((ref) => null);
 
 /// 悬空引用提示（设计文档 1.8.3）。
 final danglingBookProvider = StateProvider<Book?>((ref) => null);
+
+/// 直接打开一个本地文件（不经过 MyLibrary 导入流程）。
+///
+/// 用途：让用户挑选任意 EPUB / PDF / TXT / Markdown 立刻阅读，
+/// 不需要先配置图书馆目录。也让「下载后试一下」这件事变得简单。
+final standaloneFileProvider = StateProvider<String?>((ref) => null);
+
+/// 弹出文件选择器并打开选中的书。
+Future<void> pickAndOpenFile(WidgetRef ref) async {
+  const typeGroup = XTypeGroup(
+    label: '电子书',
+    extensions: <String>['epub', 'pdf', 'txt', 'md', 'markdown'],
+  );
+  final file = await openFile(acceptedTypeGroups: <XTypeGroup>[typeGroup]);
+  if (file == null) return;
+  ref.read(standaloneFileProvider.notifier).state = file.path;
+  ref.read(appRouteProvider.notifier).state = AppRoute.reader;
+}
 
 /// 打开一个 MyLibrary 目录。
 Future<void> openLibrary(WidgetRef ref, String root) async {
@@ -74,7 +93,7 @@ class LibraryPage extends ConsumerWidget {
     final dangling = ref.watch(danglingBookProvider);
 
     if (library == null || root == null) {
-      return _EmptyLibrary(onOpen: (path) => openLibrary(ref, path));
+      return _EmptyLibrary(onOpen: (path) => openLibrary(ref, path), ref: ref);
     }
 
     final groups = _groupBooks(library.books);
@@ -86,6 +105,11 @@ class LibraryPage extends ConsumerWidget {
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: Center(child: Text('v${library.version} · ${library.books.length} 本', style: Theme.of(context).textTheme.bodySmall)),
+          ),
+          IconButton(
+            tooltip: '直接打开一本书',
+            icon: const Icon(Icons.folder_open),
+            onPressed: () => pickAndOpenFile(ref),
           ),
           IconButton(
             tooltip: '刷新',
@@ -121,9 +145,10 @@ class LibraryPage extends ConsumerWidget {
 
 /// 空图书馆提示。
 class _EmptyLibrary extends StatelessWidget {
-  const _EmptyLibrary({required this.onOpen});
+  const _EmptyLibrary({required this.onOpen, required this.ref});
 
   final void Function(String path) onOpen;
+  final WidgetRef ref;
 
   @override
   Widget build(BuildContext context) {
@@ -137,9 +162,16 @@ class _EmptyLibrary extends StatelessWidget {
             const SizedBox(height: 16),
             const Text('还没有打开图书馆'),
             const SizedBox(height: 16),
-            FilledButton(
+            FilledButton.icon(
               onPressed: () async => onOpen(await defaultLibraryRoot()),
-              child: const Text('打开默认位置'),
+              icon: const Icon(Icons.library_books),
+              label: const Text('打开默认图书馆'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => pickAndOpenFile(ref),
+              icon: const Icon(Icons.folder_open),
+              label: const Text('直接打开一本书…'),
             ),
           ],
         ),
