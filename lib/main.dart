@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'app.dart';
+import 'pdf/pdf_ink_export.dart';
 import 'storage/notes_location.dart';
 
 Future<void> main() async {
@@ -23,8 +24,9 @@ Future<void> main() async {
   // 权限，边车仍会写在书旁边 —— 由 notes_location 的可写性探测决定。
   try {
     final docs = await getApplicationDocumentsDirectory();
-    final dir = p.join(docs.path, 'annotations');
-    notesFallbackDir = dir;
+    notesFallbackDir = p.join(docs.path, 'annotations');
+    // 写回原生 PDF 注释前会先把原文件备份到这里
+    pdfBackupDir = p.join(docs.path, 'pdf-backups');
   } catch (error, stack) {
     // 拿不到文档目录不应该导致应用起不来：此时退回目录为空，
     // 写边车失败会照常报错，用户能看到真实原因

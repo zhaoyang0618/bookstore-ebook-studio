@@ -13,6 +13,7 @@ import '../engines/book_engine.dart';
 import '../engines/epub_webview.dart';
 import '../features/annotation/ink_canvas.dart';
 import '../features/annotation/pdf_ink.dart';
+import '../pdf/pdf_ink_export.dart';
 import '../features/annotation/annotation_panel.dart';
 import '../library/library_page.dart';
 import '../models/mylibrary_models.dart';
@@ -160,6 +161,91 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     ref.read(annotationsProvider.notifier).state = _annotations;
     unawaited(_persistAnnotations());
     setState(() {});
+  }
+
+  /// 把当前页墨迹写成 PDF 原生注释并写回文件。
+  ///
+  /// 设计文档 3.3 的目标形态：注释成为 PDF 标准对象，
+  /// dsh 版（PDF.js）、Acrobat、Preview 都能直接看到。
+  Future<void> _exportInkToPdf() async {
+    final engine = _engine;
+    if (engine is! PdfEngine) return;
+    final page = (_engine?.currentIndex ?? 0) + 1;
+
+    // 收集本页墨迹，按批注分组
+    final inputs = <InkAnnotationInput>[];
+    for (final annotation in _inkAnnotationsOfPage(page)) {
+      final strokes = annotation.strokes;
+      if (strokes == null || strokes.isEmpty) continue;
+      inputs.add(InkAnnotationInput(
+        id: annotation.id,
+        color: _parseAnnotationColor(annotation),
+        strokes: strokes.map(InkStroke.fromJson).toList(),
+      ));
+    }
+
+    if (inputs.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('本页没有墨迹可导出')),
+        );
+      }
+      return;
+    }
+
+    // 明确告知：这会**修改原 PDF 文件**
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('写入 PDF 原生注释？'),
+        content: Text(
+          '将把第 $page 页的 ${inputs.length} 条墨迹写成 PDF 标准 /Ink 注释，'
+          '并**直接修改**：\n\n${engine.filePath}\n\n'
+          '这样其它阅读器（PDF.js / Acrobat / 预览）也能看到笔迹。\n'
+          '写入前会自动备份原文件。',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('写入')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      final result = await writeInkIntoPdf(
+        pdfPath: engine.filePath,
+        pageNumber: page,
+        annotations: inputs,
+        backupDir: pdfBackupDir,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 8),
+          content: Text(
+            '已写入 ${result.annotationCount} 条原生注释（${result.strokeCount} 条笔迹）\n'
+            '文件现为 ${(result.bytes / 1024).round()} KB'
+            '${result.backupPath != null ? '\n原文件备份：${result.backupPath}' : ''}',
+          ),
+        ),
+      );
+    } on PdfInkExportException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 10),
+          content: Text('写入失败：${error.message}'),
+        ),
+      );
+    }
+  }
+
+  /// 从批注里取出颜色（缺省红色）。
+  Color _parseAnnotationColor(Annotation annotation) {
+    final strokes = annotation.strokes;
+    if (strokes == null || strokes.isEmpty) return const Color(0xFFE53935);
+    return InkStroke.fromJson(strokes.first).color;
   }
 
   /// 持久化当前批注列表。
@@ -328,6 +414,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             icon: const Icon(Icons.sticky_note_2_outlined),
             onPressed: () => _showAnnotations(context, annotations),
           ),
+          if (_engine is PdfEngine)
+            IconButton(
+              tooltip: '写入 PDF 原生注释',
+              icon: const Icon(Icons.picture_as_pdf_outlined),
+              onPressed: _exportInkToPdf,
+            ),
         ],
       ),
       body: Column(
