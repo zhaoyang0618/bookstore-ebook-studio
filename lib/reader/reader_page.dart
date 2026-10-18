@@ -43,6 +43,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
   InkTool _inkTool = InkTool.pen;
   Color _inkColor = kInkPalette.first;
 
+  /// 是否已就「批注存在应用内部目录」提示过（只提示一次，不反复打扰）。
+  bool _notesFallbackWarned = false;
+
   /// 当前批注列表的镜像，避免在回调里读到过期的 provider 值。
   List<Annotation> _annotations = const [];
 
@@ -165,12 +168,36 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     if (engine == null) return;
     try {
       await engine.saveAnnotations(_annotations);
+      // 成功时若用的是退回目录，提示一次位置（避免用户以为批注丢了）
+      final location = engine.notesLocation;
+      if (!location.besideBook) _warnAboutNotesLocation(location);
     } on FileSystemException catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('批注保存失败：${error.message}')));
-      }
+      if (!mounted) return;
+      final path = engine.notesPath;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 8),
+          content: Text(
+            '批注保存失败：${error.osError?.message ?? error.message}\n'
+            '路径：$path\n'
+            '${error.osError?.errorCode == 13 ? '权限不足 —— 沙箱不允许写入该目录' : ''}',
+          ),
+        ),
+      );
+      debugPrint('批注保存失败：$error\n路径：$path');
     }
+  }
+
+  /// 边车被放到应用内部目录时提示一次。
+  void _warnAboutNotesLocation(NotesLocation location) {
+    if (_notesFallbackWarned) return;
+    _notesFallbackWarned = true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 6),
+        content: Text(location.reason ?? '批注保存在应用内部目录，不随书同步'),
+      ),
+    );
   }
 
   /// 打开一本书。`root` 为 null 表示「独立文件」模式（不经 MyLibrary）。

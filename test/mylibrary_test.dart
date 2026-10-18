@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ebook_studio/features/annotation/ink_canvas.dart';
 import 'package:ebook_studio/features/annotation/pdf_ink.dart';
 import 'package:flutter/material.dart';
+import 'package:ebook_studio/storage/notes_location.dart';
 
 /// 临时目录里的一个 MyLibrary。
 Library makeLibrary({
@@ -781,6 +782,90 @@ void main() {
       expect(hitTestPage(ink.hits, const Offset(150, 200))?.pageNumber, 1);
       // 记录布局不应触发通知（它在 build 期间调用）
       expect(ink.hits.first.size, const Size(595, 842));
+    });
+  });
+
+  group('批注边车位置（沙箱退回）', () {
+    setUp(resetNotesLocationCache);
+    tearDown(() {
+      resetNotesLocationCache();
+      notesFallbackDir = null;
+    });
+
+    test('目录可写时，边车就在书旁边（设计文档 1.5）', () {
+      final location = resolveNotesLocation(
+        '/Library/Books/三体.pdf',
+        probe: (_) => true,
+      );
+      expect(location.besideBook, isTrue);
+      expect(location.path, '/Library/Books/三体.notes.json');
+      expect(location.reason, isNull);
+    });
+
+    test('目录不可写时退回应用内部目录，并给出原因', () {
+      notesFallbackDir = '/app/annotations';
+      final location = resolveNotesLocation(
+        '/Users/me/Downloads/2.pdf',
+        probe: (_) => false,
+      );
+      expect(location.besideBook, isFalse);
+      expect(location.path, startsWith('/app/annotations/'));
+      expect(location.path, endsWith('.notes.json'));
+      expect(location.reason, isNotNull);
+      // 文件名保留书名便于人工识别
+      expect(location.path, contains('2-'));
+    });
+
+    test('未配置退回目录且不可写时，仍返回书旁路径（暴露真实错误）', () {
+      notesFallbackDir = null;
+      final location = resolveNotesLocation('/a/b.epub', probe: (_) => false);
+      expect(location.besideBook, isTrue);
+      expect(location.path, '/a/b.notes.json');
+    });
+
+    test('结果被缓存，同一本书只探测一次', () {
+      var calls = 0;
+      bool probe(String _) {
+        calls += 1;
+        return true;
+      }
+
+      resolveNotesLocation('/x/y.pdf', probe: probe);
+      resolveNotesLocation('/x/y.pdf', probe: probe);
+      expect(calls, 1);
+    });
+
+    test('稳定键：同名不同路径不冲突，同路径稳定', () {
+      final a = stableKeyFor('/one/书.pdf');
+      final b = stableKeyFor('/two/书.pdf');
+      final c = stableKeyFor('/one/书.pdf');
+      expect(a, isNot(b));
+      expect(a, c);
+    });
+
+    test('稳定键保留可读书名', () {
+      final key = stableKeyFor('/books/蛤蟆先生去看心理医生.epub');
+      expect(key, startsWith('蛤蟆先生去看心理医生'));
+      // 后缀是 12 位十六进制哈希
+      expect(RegExp(r'-[0-9a-f]{12}$').hasMatch(key), isTrue);
+    });
+
+    test('特殊字符不会进入文件名', () {
+      final key = stableKeyFor('/books/a b:c*d?e.pdf');
+      expect(key, isNot(contains(' ')));
+      expect(key, isNot(contains(':')));
+      expect(key, isNot(contains('*')));
+      expect(key, isNot(contains('?')));
+    });
+
+    test('边车路径与设计文档 1.5 一致', () {
+      expect(
+        notesPathFor('/lib/books/三体/三体.pdf'),
+        '/lib/books/三体/三体.notes.json',
+      );
+      expect(notesPathFor('/lib/三体.epub'), '/lib/三体.notes.json');
+      // 多后缀只去掉最后一段
+      expect(notesPathFor('/lib/a.b.pdf'), '/lib/a.b.notes.json');
     });
   });
 }

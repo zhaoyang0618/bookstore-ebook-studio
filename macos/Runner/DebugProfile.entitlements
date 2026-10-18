@@ -8,8 +8,8 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
-	<!-- 文件选择器读取用户选中的电子书 -->
-	<key>com.apple.security.files.user-selected.read-only</key>
+	<!-- 文件访问：读用户选中的书，并写回边车批注 / 原生 PDF 注释 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>

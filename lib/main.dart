@@ -3,10 +3,33 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'app.dart';
+import 'storage/notes_location.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 配置批注边车的「退回目录」。
+  //
+  // 背景：设计文档 1.5 要求边车就在书旁边（随书同步）。但 macOS 沙箱
+  // 只授予用户选中的**那一个文件**的读写权限，不包括它所在目录，
+  // 因此「直接打开一本书」选到的散装文件无法在旁边创建 .notes.json。
+  // 这里准备一个应用内部目录作为兜底，保证批注不会丢。
+  //
+  // 若用户打开的是目录（如 MyLibrary 根目录），沙箱授予整个目录的
+  // 权限，边车仍会写在书旁边 —— 由 notes_location 的可写性探测决定。
+  try {
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = p.join(docs.path, 'annotations');
+    notesFallbackDir = dir;
+  } catch (error, stack) {
+    // 拿不到文档目录不应该导致应用起不来：此时退回目录为空，
+    // 写边车失败会照常报错，用户能看到真实原因
+    debugPrint('无法准备批注退回目录：$error\n$stack');
+  }
+
   runApp(const ProviderScope(child: EbookStudioApp()));
 }

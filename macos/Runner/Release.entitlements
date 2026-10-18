@@ -4,9 +4,13 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- 文件选择器（file_selector）读取用户选中的电子书需要此权限。
-	     缺少时沙箱会拒绝访问，表现为「选了文件却打不开」。 -->
-	<key>com.apple.security.files.user-selected.read-only</key>
+	<!-- 文件选择器（file_selector）访问用户选中的文件需要此权限。
+	     必须是 read-write：
+	     - 边车批注 .notes.json 可能就在书旁边
+	     - 设计文档 3.3 的原生 PDF 注释需要写回 PDF 文件本身
+	     注意：该权限只覆盖「用户选中的那一个文件」，不含其所在目录；
+	     目录级写入由用户选择目录（如 MyLibrary 根目录）时授权。 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 	<!-- 翻译功能需访问外部 API -->
 	<key>com.apple.security.network.client</key>

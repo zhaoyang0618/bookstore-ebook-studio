@@ -13,6 +13,9 @@ import 'package:pdfrx/pdfrx.dart';
 
 import '../models/mylibrary_models.dart';
 import '../storage/my_library_store.dart';
+import '../storage/notes_location.dart';
+
+export '../storage/notes_location.dart' show notesPathFor, NotesLocation;
 import 'epub_webview.dart';
 
 /// 目录项。
@@ -88,7 +91,12 @@ abstract class BookEngine {
   /// 批注边车文件路径。
   ///
   /// 设计文档 1.5：`books/{title}/{title}.notes.json`。
+  /// 若因沙箱限制无法写在书旁边，会退回到应用内部目录
+  /// （见 storage/notes_location.dart）。
   String get notesPath;
+
+  /// 边车位置详情（含是否退回了应用内部目录）。
+  NotesLocation get notesLocation;
 
   /// 翻页。
   Future<void> nextPage();
@@ -250,10 +258,13 @@ class EpubEngine extends BaseBookEngine {
   bool supportsAnnotation() => true;
 
   @override
-  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
+  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPath);
 
   @override
-  String get notesPath => notesPathFor(_filePath);
+  NotesLocation get notesLocation => resolveNotesLocation(_filePath);
+
+  @override
+  String get notesPath => notesLocation.path;
 
   @override
   Future<void> saveAnnotations(List<Annotation> annotations) async {
@@ -400,11 +411,14 @@ class PdfEngine extends BaseBookEngine {
   @override
   Future<List<Annotation>> loadAnnotations() async {
     // PDF 注释是**原生 PDF 注释对象**，直接从文件本身读取（设计文档 3.3）
-    return readSidecarAnnotations(notesPathFor(_filePath));
+    return readSidecarAnnotations(notesPath);
   }
 
   @override
-  String get notesPath => notesPathFor(_filePath);
+  NotesLocation get notesLocation => resolveNotesLocation(_filePath);
+
+  @override
+  String get notesPath => notesLocation.path;
 
   @override
   Future<void> saveAnnotations(List<Annotation> annotations) async {
@@ -468,10 +482,13 @@ class MarkdownEngine extends BaseBookEngine {
   bool supportsAnnotation() => true;
 
   @override
-  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
+  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPath);
 
   @override
-  String get notesPath => notesPathFor(_filePath);
+  NotesLocation get notesLocation => resolveNotesLocation(_filePath);
+
+  @override
+  String get notesPath => notesLocation.path;
 
   @override
   Future<void> saveAnnotations(List<Annotation> annotations) async {
@@ -532,10 +549,13 @@ class TxtEngine extends BaseBookEngine {
   bool supportsAnnotation() => true;
 
   @override
-  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPathFor(_filePath));
+  Future<List<Annotation>> loadAnnotations() async => readSidecarAnnotations(notesPath);
 
   @override
-  String get notesPath => notesPathFor(_filePath);
+  NotesLocation get notesLocation => resolveNotesLocation(_filePath);
+
+  @override
+  String get notesPath => notesLocation.path;
 
   @override
   Future<void> saveAnnotations(List<Annotation> annotations) async {
@@ -556,7 +576,7 @@ class TxtEngine extends BaseBookEngine {
 }
 
 /// 由书籍路径推导边车文件路径（设计文档 1.2）。
-String notesPathFor(String filePath) => '${filePath.replaceAll(RegExp(r'\.[^./]+$'), '')}.notes.json';
+
 
 /// 从边车文件读取批注（EPUB / Markdown / TXT）。
 Future<List<Annotation>> readSidecarAnnotations(String notesPath) async {
