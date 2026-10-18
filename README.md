@@ -105,7 +105,41 @@ flutter analyze             # 静态检查
 | iOS | `macos-14` | 未签名 `.app`（真机需自签） | ✅ |
 | Android | `ubuntu-latest` | `app-release.apk` | ✅ |
 
-产物在 Actions 运行的 Artifacts 区下载，保留 14 天。
+### 下载（打 tag 自动发布到 Release）
+
+打 `v*` tag 时 `release` 作业会把各平台产物挂到 GitHub Release。
+Release 资产**公开可下载**（Actions 的 artifact 反而需要登录），方便直接分发：
+
+**<https://github.com/zhaoyang0618/bookstore-ebook-studio/releases>**
+
+最新 `v0.2.0`：
+
+| 文件 | 大小 | 链接 |
+|---|---|---|
+| macOS (arm64) | 27.0 MB | [ebook_studio-macos.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-macos.zip) |
+| Windows | 17.8 MB | [ebook_studio-windows.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-windows.zip) |
+| Linux | 23.4 MB | [ebook_studio-linux.tar.gz](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-linux.tar.gz) |
+| Android | 67.9 MB | [app-release.apk](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/app-release.apk) |
+| iOS（未签名） | 12.4 MB | [ebook_studio-ios-unsigned.zip](https://github.com/zhaoyang0618/bookstore-ebook-studio/releases/download/v0.2.0/ebook_studio-ios-unsigned.zip) |
+
+#### 运行未签名的 macOS 应用
+
+产物没有 Apple 开发者签名，Gatekeeper 会拦截。首次打开需要：
+
+```bash
+# 方式一：解除隔离标记（推荐，一次就好）
+xattr -dr com.apple.quarantine /path/to/ebook_studio.app
+
+# 方式二：右键点 app → 打开 → 在弹窗里再点「打开」
+```
+
+> macOS 产物是 **arm64**（构建用的 `macos-14` runner 是 Apple Silicon）。
+> Intel Mac 需另配 `macos-13` runner 或构建 universal binary。
+
+#### 试用
+
+应用启动后点 **「直接打开一本书…」**，选任意 EPUB / PDF / TXT / Markdown 即可阅读，
+不需要先配置 MyLibrary 目录。
 
 ### 踩过的两个 CI 坑
 
