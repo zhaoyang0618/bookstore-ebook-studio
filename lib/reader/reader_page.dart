@@ -4,6 +4,7 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
@@ -202,7 +203,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           '将把第 $page 页的 ${inputs.length} 条墨迹写成 PDF 标准 /Ink 注释，'
           '并**直接修改**：\n\n${engine.filePath}\n\n'
           '这样其它阅读器（PDF.js / Acrobat / 预览）也能看到笔迹。\n'
-          '写入前会自动备份原文件。',
+          '写入前会自动备份原文件。若系统不允许修改该文件，可以改用「另存为」。',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
@@ -232,11 +233,70 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
       );
     } on PdfInkExportException catch (error) {
       if (!mounted) return;
+      // 原地写入被沙箱拒绝时，给一条可行的出路：另存为
+      final canSaveAs = error.message.contains('沙箱') || error.message.contains('权限');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          duration: const Duration(seconds: 10),
+          duration: const Duration(seconds: 12),
           content: Text('写入失败：${error.message}'),
+          action: canSaveAs
+              ? SnackBarAction(label: '另存为', onPressed: _saveInkCopyAs)
+              : null,
         ),
+      );
+    } catch (error) {
+      // 兜底：任何非预期异常都要让用户看见，不能静默失败
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 12),
+          content: Text('写入失败（未预期）：$error'),
+        ),
+      );
+      debugPrint('导出 PDF 注释时出现未预期异常：$error');
+    }
+  }
+
+  /// 另存为一份带注释的 PDF 副本（用户在保存面板里选位置，
+  /// 沙箱会对该位置授权，因此这条路总能走通）。
+  Future<void> _saveInkCopyAs() async {
+    final engine = _engine;
+    if (engine is! PdfEngine) return;
+    final page = (_engine?.currentIndex ?? 0) + 1;
+
+    final inputs = <InkAnnotationInput>[];
+    for (final annotation in _inkAnnotationsOfPage(page)) {
+      final strokes = annotation.strokes;
+      if (strokes == null || strokes.isEmpty) continue;
+      inputs.add(InkAnnotationInput(
+        id: annotation.id,
+        color: _parseAnnotationColor(annotation),
+        strokes: strokes.map(InkStroke.fromJson).toList(),
+      ));
+    }
+    if (inputs.isEmpty) return;
+
+    final location = await getSaveLocation(
+      suggestedName: '${p.basenameWithoutExtension(engine.filePath)}-已标注.pdf',
+      acceptedTypeGroups: const [XTypeGroup(label: 'PDF', extensions: ['pdf'])],
+    );
+    if (location == null || !mounted) return;
+
+    try {
+      final result = exportInkAnnotations(
+        sourcePath: engine.filePath,
+        outputPath: location.path,
+        pageNumber: page,
+        annotations: inputs,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已另存为：${result.outputPath}')),
+      );
+    } on PdfInkExportException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('另存失败：${error.message}')),
       );
     }
   }

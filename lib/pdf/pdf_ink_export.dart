@@ -79,16 +79,14 @@ class InkExportResult {
   final String? backupPath;
 }
 
-/// 把某页的墨迹导出成原生 `/Ink` 注释，写到 [outputPath]。
+/// 生成「含原生 `/Ink` 注释」的 PDF 字节，**不写任何文件**。
 ///
-/// - [pageNumber]：1 起始的页码
-/// - [strokesByAnnotation]：一份批注对应一组笔迹（一条批注可含多笔）
-/// - 采用**增量更新**：不重写原文件内容，只在尾部追加
-///
-/// 返回写入统计；失败抛 [PdfInkExportException]。
-InkExportResult exportInkAnnotations({
+/// 之所以先把生成与落盘分开：macOS 沙箱只授权用户选中的那一个文件，
+/// **不含它所在目录**，所以「先写临时文件再改名」这种做法根本行不通
+///（连同级临时文件都创建不了）。在内存里生成好再一次性写入，
+/// 既避开沙箱限制，也避免了写的中间态。
+({Uint8List bytes, int annotationCount, int strokeCount}) buildInkAnnotatedBytes({
   required String sourcePath,
-  required String outputPath,
   required int pageNumber,
   required List<InkAnnotationInput> annotations,
   String author = 'ebook studio',
@@ -98,7 +96,12 @@ InkExportResult exportInkAnnotations({
     throw PdfInkExportException('没有要导出的墨迹');
   }
 
-  final data = File(sourcePath).readAsBytesSync();
+  final Uint8List data;
+  try {
+    data = File(sourcePath).readAsBytesSync();
+  } on FileSystemException catch (error) {
+    throw PdfInkExportException('读取 PDF 失败：${error.osError?.message ?? error.message}');
+  }
   final reader = PdfFileReader.fromBytes(data);
   final startXref = findLastStartXref(data);
 
@@ -212,123 +215,77 @@ InkExportResult exportInkAnnotations({
   }
 
   final output = writer.finish(startXref);
-  File(outputPath).writeAsBytesSync(output, flush: true);
-
-  return InkExportResult(
-    outputPath: outputPath,
-    pageNumber: pageNumber,
-    annotationCount: newRefs.length,
-    strokeCount: strokeCount,
-    bytes: output.length,
-  );
+  return (bytes: output, annotationCount: newRefs.length, strokeCount: strokeCount);
 }
 
-/// 把墨迹**直接写回原 PDF 文件**（设计文档 3.3 的目标形态）。
+/// 把某页的墨迹导出成原生 `/Ink` 注释，写到 [outputPath]。
 ///
-/// ## 为什么要「先生成再校验最后写」
-///
-/// macOS 沙箱只授权了用户选中的**那一个文件**，不含其所在目录，
-/// 因此无法用「写临时文件再 rename」的原子替换（那需要创建同级文件）。
-/// 只能原地覆盖，而 `FileMode.write` 会先截断 —— 一旦写入中途失败，
-/// 原文件就废了。
-///
-/// 所以流程刻意设计成：
-/// 1. **在内存中**生成完整的新 PDF
-/// 2. 用我们自己的解析器**校验**生成结果（页数一致、注释确实在里面）
-/// 3. 备份原文件到应用容器
-/// 4. 才写入目标文件
-///
-/// 任何一步失败都在touch原文件之前中止。
-Future<InkExportResult> writeInkIntoPdf({
-  required String pdfPath,
+/// 采用**增量更新**：不重写原文件内容，只在尾部追加。
+/// 失败抛 [PdfInkExportException]。
+InkExportResult exportInkAnnotations({
+  required String sourcePath,
+  required String outputPath,
   required int pageNumber,
   required List<InkAnnotationInput> annotations,
   String author = 'ebook studio',
-  String? backupDir,
   DateTime? now,
-}) async {
-  final source = File(pdfPath);
-  if (!source.existsSync()) {
-    throw PdfInkExportException('文件不存在：$pdfPath');
-  }
-
-  // 1. 先在内存里生成（写到不存在的路径也不会动原文件）
-  final tempPath = '$pdfPath.ebook-studio-export';
-  final result = exportInkAnnotations(
-    sourcePath: pdfPath,
-    outputPath: tempPath,
+}) {
+  final built = buildInkAnnotatedBytes(
+    sourcePath: sourcePath,
     pageNumber: pageNumber,
     annotations: annotations,
     author: author,
     now: now,
   );
-
-  // 2. 校验生成结果：能被解析、页数一致、注释确实在
-  final generated = File(tempPath).readAsBytesSync();
   try {
-    final reader = PdfFileReader.fromBytes(generated);
-    final original = PdfFileReader.fromBytes(source.readAsBytesSync());
-    if (reader.collectPages().length != original.collectPages().length) {
-      throw PdfInkExportException('校验失败：生成文件的页数与原文件不一致');
-    }
-    final page = reader.resolve(reader.collectPages()[pageNumber - 1]) as PdfDict;
-    final annots = reader.dictGet(page, 'Annots');
-    if (annots is! PdfArray || annots.items.isEmpty) {
-      throw PdfInkExportException('校验失败：生成文件里找不到注释');
-    }
-  } on PdfSyntaxException catch (error) {
-    throw PdfInkExportException('校验失败：生成的 PDF 无法解析（$error）');
-  }
-
-  // 3. 备份原文件
-  String? backupPath;
-  if (backupDir != null) {
-    try {
-      final dir = Directory(backupDir)..createSync(recursive: true);
-      final name = pdfPath.split(RegExp(r'[/\\]')).last;
-      final stamp = DateTime.now().toIso8601String().replaceAll(':', '-').split('.').first;
-      backupPath = '${dir.path}/$name.$stamp.bak';
-      source.copySync(backupPath);
-    } on FileSystemException {
-      backupPath = null; // 备份失败不阻断，但要在结果里如实反映
-    }
-  }
-
-  // 4. 写回原文件
-  try {
-    source.writeAsBytesSync(generated, flush: true);
+    File(outputPath).writeAsBytesSync(built.bytes, flush: true);
   } on FileSystemException catch (error) {
-    // 写失败时尽量用备份恢复
-    if (backupPath != null && File(backupPath).existsSync()) {
-      try {
-        source.writeAsBytesSync(File(backupPath).readAsBytesSync(), flush: true);
-      } on FileSystemException {
-        // 恢复也失败：把备份路径告诉用户
-      }
-    }
     throw PdfInkExportException(
-      '写入 PDF 失败：${error.osError?.message ?? error.message}'
-      '${backupPath != null ? '\n原文件备份在：$backupPath' : ''}',
+      '写入失败（${_describeFileError(error)}）：$outputPath',
     );
-  } finally {
-    final temp = File(tempPath);
-    if (temp.existsSync()) temp.deleteSync();
   }
-
   return InkExportResult(
-    outputPath: pdfPath,
-    pageNumber: result.pageNumber,
-    annotationCount: result.annotationCount,
-    strokeCount: result.strokeCount,
-    bytes: generated.length,
-    backupPath: backupPath,
+    outputPath: outputPath,
+    pageNumber: pageNumber,
+    annotationCount: built.annotationCount,
+    strokeCount: built.strokeCount,
+    bytes: built.bytes.length,
   );
 }
 
-/// [writeInkIntoPdf] 的同步版本（内部实现本就是同步的文件操作）。
+/// 把文件系统错误翻译成可操作的中文说明。
+String _describeFileError(FileSystemException error) {
+  final code = error.osError?.errorCode;
+  final message = error.osError?.message ?? error.message;
+  return switch (code) {
+    1 => '权限不足，macOS 沙箱不允许写入该位置',
+    13 => '权限不足，macOS 沙箱不允许写入该位置',
+    2 => '目录或文件不存在',
+    28 => '磁盘空间不足',
+    _ => message,
+  };
+}
+
+/// 把墨迹**直接写回原 PDF 文件**（设计文档 3.3 的目标形态）。
 ///
-/// 单独暴露是为了让单元测试能直接断言「失败时原文件未被改动」，
-/// 不引入 async 时序的不确定性。
+/// ## 沙箱约束决定了实现方式
+///
+/// macOS 只授权用户选中的**那一个文件**，不含其所在目录。
+/// 所以：
+/// - ❌ 不能「写临时文件再 rename」—— 连同级临时文件都创建不了
+/// - ❌ 不能「另存到同目录」—— 同样需要目录权限
+/// - ✅ 只能**原地覆盖**那个已被授权的文件
+///
+/// 原地覆盖的风险是「写到一半失败会毁掉原文件」，因此流程是：
+/// 1. **在内存中**生成完整的新 PDF（不碰磁盘）
+/// 2. 用我们自己的解析器**校验**（页数一致、注释确实在）
+/// 3. 备份原文件到应用容器
+/// 4. 才一次性写入目标文件
+///
+/// 任一步失败都在碰原文件之前中止；写入失败会用备份回滚。
+///
+/// 失败一律抛 [PdfInkExportException]（含可操作的中文原因），
+/// 不会让 `FileSystemException` 直接逃逸出去。
 InkExportResult writeInkIntoPdfSync({
   required String pdfPath,
   required int pageNumber,
@@ -342,19 +299,18 @@ InkExportResult writeInkIntoPdfSync({
     throw PdfInkExportException('文件不存在：$pdfPath');
   }
 
-  final tempPath = '$pdfPath.ebook-studio-export';
-  final result = exportInkAnnotations(
+  // 1. 内存中生成
+  final built = buildInkAnnotatedBytes(
     sourcePath: pdfPath,
-    outputPath: tempPath,
     pageNumber: pageNumber,
     annotations: annotations,
     author: author,
     now: now,
   );
 
-  final generated = File(tempPath).readAsBytesSync();
+  // 2. 校验生成结果
   try {
-    final reader = PdfFileReader.fromBytes(generated);
+    final reader = PdfFileReader.fromBytes(built.bytes);
     final original = PdfFileReader.fromBytes(source.readAsBytesSync());
     if (reader.collectPages().length != original.collectPages().length) {
       throw PdfInkExportException('校验失败：生成文件的页数与原文件不一致');
@@ -366,11 +322,11 @@ InkExportResult writeInkIntoPdfSync({
     }
   } on PdfSyntaxException catch (error) {
     throw PdfInkExportException('校验失败：生成的 PDF 无法解析（$error）');
-  } finally {
-    final temp = File(tempPath);
-    if (temp.existsSync()) temp.deleteSync();
+  } on FileSystemException catch (error) {
+    throw PdfInkExportException('校验时读取文件失败：${_describeFileError(error)}');
   }
 
+  // 3. 备份原文件（失败不阻断，但要在结果里如实反映）
   String? backupPath;
   if (backupDir != null) {
     try {
@@ -384,31 +340,50 @@ InkExportResult writeInkIntoPdfSync({
     }
   }
 
+  // 4. 写回
   try {
-    source.writeAsBytesSync(generated, flush: true);
+    source.writeAsBytesSync(built.bytes, flush: true);
   } on FileSystemException catch (error) {
     if (backupPath != null && File(backupPath).existsSync()) {
       try {
         source.writeAsBytesSync(File(backupPath).readAsBytesSync(), flush: true);
       } on FileSystemException {
-        // 恢复失败：下面把备份路径告诉用户
+        // 恢复也失败：下面把备份路径告诉用户，让他手动处理
       }
     }
     throw PdfInkExportException(
-      '写入 PDF 失败：${error.osError?.message ?? error.message}'
-      '${backupPath != null ? '\n原文件备份在：$backupPath' : ''}',
+      '写入 PDF 失败：${_describeFileError(error)}'
+      '${backupPath != null ? '\n原文件已备份在：$backupPath' : ''}',
     );
   }
 
   return InkExportResult(
     outputPath: pdfPath,
-    pageNumber: result.pageNumber,
-    annotationCount: result.annotationCount,
-    strokeCount: result.strokeCount,
-    bytes: generated.length,
+    pageNumber: pageNumber,
+    annotationCount: built.annotationCount,
+    strokeCount: built.strokeCount,
+    bytes: built.bytes.length,
     backupPath: backupPath,
   );
 }
+
+/// [writeInkIntoPdfSync] 的异步包装（文件操作本身是同步的）。
+Future<InkExportResult> writeInkIntoPdf({
+  required String pdfPath,
+  required int pageNumber,
+  required List<InkAnnotationInput> annotations,
+  String author = 'ebook studio',
+  String? backupDir,
+  DateTime? now,
+}) async =>
+    writeInkIntoPdfSync(
+      pdfPath: pdfPath,
+      pageNumber: pageNumber,
+      annotations: annotations,
+      author: author,
+      backupDir: backupDir,
+      now: now,
+    );
 
 /// 一条待导出的批注。
 class InkAnnotationInput {

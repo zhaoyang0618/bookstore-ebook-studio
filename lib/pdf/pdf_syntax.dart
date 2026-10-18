@@ -39,12 +39,24 @@ sealed class PdfObject {
 /// `null`
 class PdfNull extends PdfObject {
   const PdfNull();
+
+  @override
+  bool operator ==(Object other) => other is PdfNull;
+
+  @override
+  int get hashCode => 0;
 }
 
 /// `true` / `false`
 class PdfBool extends PdfObject {
   const PdfBool(this.value);
   final bool value;
+
+  @override
+  bool operator ==(Object other) => other is PdfBool && other.value == value;
+
+  @override
+  int get hashCode => value.hashCode;
 }
 
 /// 整数或实数
@@ -62,6 +74,12 @@ class PdfNumber extends PdfObject {
 
   @override
   String toString() => 'PdfNumber($value)';
+
+  @override
+  bool operator ==(Object other) => other is PdfNumber && other.value == value;
+
+  @override
+  int get hashCode => value.hashCode;
 }
 
 /// `/Name`
@@ -91,6 +109,12 @@ class PdfName extends PdfObject {
 
   @override
   String toString() => 'PdfName($name)';
+
+  @override
+  bool operator ==(Object other) => other is PdfName && other.name == name;
+
+  @override
+  int get hashCode => name.hashCode;
 }
 
 /// `(literal)` 或 `<hex>` 字符串。
@@ -136,6 +160,23 @@ class PdfString extends PdfObject {
 
   @override
   String toString() => 'PdfString(${bytes.length} bytes, hex: $isHex)';
+
+  @override
+  bool operator ==(Object other) =>
+      other is PdfString &&
+      other.isHex == isHex &&
+      other.bytes.length == bytes.length &&
+      _bytesEqual(other.bytes, bytes);
+
+  @override
+  int get hashCode => Object.hash(isHex, bytes.length, Object.hashAll(bytes));
+
+  static bool _bytesEqual(Uint8List a, Uint8List b) {
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }
 
 /// 间接引用 `N G R`

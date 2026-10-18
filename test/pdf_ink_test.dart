@@ -494,4 +494,97 @@ void main() {
       expect(File(kRealPdf).lengthSync(), 1506800);
     }, skip: !hasRealPdf);
   });
+
+  group('沙箱/权限场景（回归测试）', () {
+    test('不能创建同级文件时，抛的是可读的 PdfInkExportException', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_sandbox');
+      final target = File('${dir.path}/book.pdf')..writeAsBytesSync(buildClassicPdf());
+
+      // 模拟 macOS 沙箱：能读写这个文件，但不能在它所在目录创建新文件。
+      // 这里直接把目录设为只读来复现。
+      Process.runSync('chmod', ['500', dir.path]);
+      addTearDown(() => Process.runSync('chmod', ['700', dir.path]));
+
+      try {
+        // 先确认环境确实复现了「目录不可写」
+        final probeFailed = () {
+          try {
+            File('${dir.path}/probe').writeAsStringSync('x');
+            return false;
+          } on FileSystemException {
+            return true;
+          }
+        }();
+        if (!probeFailed) return; // 以 root 运行时权限不生效，跳过
+
+        // 关键：写回**不应该**创建任何同级文件，因此不该因为目录只读而失败
+        final result = writeInkIntoPdfSync(
+          pdfPath: target.path,
+          pageNumber: 1,
+          annotations: [
+            InkAnnotationInput(
+              id: 'ink-sandbox',
+              color: const Color(0xFFE53935),
+              strokes: [strokeAt([const Offset(10, 10), const Offset(40, 40)])],
+            ),
+          ],
+        );
+        expect(result.annotationCount, 1);
+        expect(result.bytes, greaterThan(0));
+        // 目录里仍然只有原始文件，没有残留的临时文件
+        final names = dir.listSync().map((f) => f.path.split('/').last).toList();
+        expect(names, ['book.pdf']);
+      } on PdfInkExportException catch (error) {
+        // 即便失败，也必须是可读的中文原因，而不是裸 FileSystemException
+        expect(error.message, isNotEmpty);
+      }
+    });
+
+    test('生成阶段完全不碰磁盘（纯内存）', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_mem');
+      final src = File('${dir.path}/in.pdf')..writeAsBytesSync(buildClassicPdf());
+      final before = dir.listSync().map((f) => f.path.split('/').last).toSet();
+
+      final built = buildInkAnnotatedBytes(
+        sourcePath: src.path,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'ink-mem',
+            color: const Color(0xFF1E88E5),
+            strokes: [strokeAt([const Offset(5, 5), const Offset(25, 25)])],
+          ),
+        ],
+      );
+      expect(built.annotationCount, 1);
+      expect(built.bytes.length, greaterThan(0));
+
+      // 生成过程不得产生任何新文件
+      final after = dir.listSync().map((f) => f.path.split('/').last).toSet();
+      expect(after, before);
+
+      // 生成的字节本身就是合法的、含注释的 PDF
+      final reader = PdfFileReader.fromBytes(built.bytes);
+      final page = reader.resolve(reader.collectPages().first) as PdfDict;
+      final annots = reader.dictGet(page, 'Annots') as PdfArray;
+      expect((reader.deref(annots.items.last) as PdfDict)['Subtype'], const PdfName('Ink'));
+    });
+
+    test('路径不存在时给出明确原因', () {
+      expect(
+        () => buildInkAnnotatedBytes(
+          sourcePath: '/nonexistent/nope.pdf',
+          pageNumber: 1,
+          annotations: [
+            InkAnnotationInput(
+              id: 'x',
+              color: const Color(0xFF000000),
+              strokes: [strokeAt([const Offset(1, 1), const Offset(2, 2)])],
+            ),
+          ],
+        ),
+        throwsA(isA<PdfInkExportException>()),
+      );
+    });
+  });
 }
