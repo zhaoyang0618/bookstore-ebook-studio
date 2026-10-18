@@ -19,10 +19,13 @@ ios/Flutter/Flutter.framework
 ios/Flutter/Flutter.podspec
 ios/Flutter/App.framework
 ios/Flutter/flutter_export_environment.sh
+ios/Flutter/Generated.xcconfig
+ios/Flutter/ephemeral/
 
 # Android
 android/.gradle/
 android/local.properties
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 android/key.properties
 android/app/debug/
 android/app/profile/
@@ -30,6 +33,7 @@ android/app/release/
 
 # macOS
 macos/Flutter/ephemeral/
+macos/Flutter/GeneratedPluginRegistrant.swift
 macos/Pods/
 macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/
 

@@ -6,7 +6,9 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 
 /// 网盘上的一个文件 / 目录条目。
@@ -298,11 +300,92 @@ class BaiduProvider implements RemoteProvider {
     await target.writeAsBytes(file.bodyBytes);
   }
 
+  /// 上传文件（设计文档 1.8.6 分片流程）。
+  ///
+  /// 百度网盘是三步协议，与 WebDAV 的一次 PUT 不同：
+  /// 1. `precreate` —— 提交元信息与分片 md5 列表，拿 `uploadid`
+  /// 2. 逐片 `superfile2` —— 上传每个分片
+  /// 3. `create` —— 合并分片
+  ///
+  /// 普通用户单分片上限 4 MiB，这里用保守值。
   @override
-  Future<void> uploadFile(String localPath, String remotePath) {
-    // 百度网盘分片上传（设计文档 1.8.6）：precreate + 分片 + create，
-    // 建议改用 WebDAV 适配器或 alist 挂载
-    throw UnsupportedError('百度网盘上传需要分片流程，请改用 WebDAV 适配器或 alist 挂载');
+  Future<void> uploadFile(String localPath, String remotePath) async {
+    final content = await File(localPath).readAsBytes();
+    const chunkSize = 4 * 1024 * 1024;
+    final totalParts = content.isEmpty ? 1 : (content.length + chunkSize - 1) ~/ chunkSize;
+    final blockList = List.generate(totalParts, (index) {
+      final start = index * chunkSize;
+      final end = start + chunkSize < content.length ? start + chunkSize : content.length;
+      return md5.convert(content.sublist(start, end)).toString();
+    });
+    final token = Uri.encodeQueryComponent(config.accessToken);
+
+    // 1. precreate
+    final preResponse = await _client.post(
+      Uri.parse('https://pan.baidu.com/rest/2.0/xpan/file?method=precreate&access_token=$token'),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: {
+        'path': remotePath,
+        'size': '${content.length}',
+        'isdir': '0',
+        'autoinit': '1',
+        'rtype': '3',
+        'block_list': jsonEncode(blockList),
+      },
+    );
+    if (preResponse.statusCode != 200) {
+      throw HttpException('百度网盘 precreate 失败：HTTP ${preResponse.statusCode}');
+    }
+    final preResult = jsonDecode(preResponse.body) as Map<String, dynamic>;
+    final uploadId = preResult['uploadid'] as String?;
+    if (uploadId == null) {
+      throw HttpException('百度网盘 precreate 未返回 uploadid：${preResponse.body}');
+    }
+
+    // 2. 逐片上传
+    for (var index = 0; index < totalParts; index += 1) {
+      final start = index * chunkSize;
+      final end = start + chunkSize < content.length ? start + chunkSize : content.length;
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse(
+          'https://d.pcs.baidu.com/rest/2.0/pcs/superfile2'
+          '?method=upload&access_token=$token&type=tmpfile'
+          '&path=${Uri.encodeQueryComponent(remotePath)}'
+          '&uploadid=${Uri.encodeQueryComponent(uploadId)}',
+        ),
+      )..fields['partseq'] = '$index';
+      request.files.add(http.MultipartFile.fromBytes(
+        'file',
+        content.sublist(start, end),
+        filename: p.basename(remotePath),
+      ));
+      final partResponse = await http.Response.fromStream(await _client.send(request));
+      if (partResponse.statusCode != 200) {
+        throw HttpException('百度网盘分片 $index 上传失败：HTTP ${partResponse.statusCode}');
+      }
+    }
+
+    // 3. create 合并
+    final createResponse = await _client.post(
+      Uri.parse('https://pan.baidu.com/rest/2.0/xpan/file?method=create&access_token=$token'),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: {
+        'path': remotePath,
+        'size': '${content.length}',
+        'isdir': '0',
+        'rtype': '3',
+        'uploadid': uploadId,
+        'block_list': jsonEncode(blockList),
+      },
+    );
+    if (createResponse.statusCode != 200) {
+      throw HttpException('百度网盘 create 失败：HTTP ${createResponse.statusCode}');
+    }
+    final createResult = jsonDecode(createResponse.body) as Map<String, dynamic>;
+    if (createResult['return_type'] == 1) {
+      throw HttpException('百度网盘 create 合并失败');
+    }
   }
 
   @override

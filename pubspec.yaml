@@ -34,6 +34,8 @@ dependencies:
   # 网盘协议（设计文档 3.2：WebDAV + 百度网盘）
   http: ^1.2.0
   xml: ^6.5.0
+  # 百度网盘分片上传需要计算分片 md5（设计文档 1.8.6）
+  crypto: ^3.0.0
 
   # 手写标注（设计文档 3.2：scribe_canvas / 自研 CustomPainter）
   # scribe_canvas: ^0.1.0
