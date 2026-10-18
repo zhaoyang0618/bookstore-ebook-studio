@@ -86,6 +86,8 @@ jobs:
   # ---------- Windows ----------
   build-windows:
     needs: check
+    permissions:
+      contents: write
     if: >-
       github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.build_targets, 'windows')
@@ -142,6 +144,20 @@ jobs:
           name: windows-build-log
           path: build-windows.log
           retention-days: 7
+
+      # artifact 下载需要认证，这里额外把日志尾部推到分支，
+      # 使其可通过公开 API 读取（便于远程诊断）
+      - name: 诊断：日志推到分支
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-Content build-windows.log -Tail 300 | Set-Content windows-build-tail.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "ci-log-${{ github.run_id }}"
+          git add -f windows-build-tail.log
+          git commit -m "ci: windows build log (run ${{ github.run_id }})"
+          git push origin "ci-log-${{ github.run_id }}"
       - name: 打包 zip
         shell: pwsh
         run: |
