@@ -13,9 +13,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # PDF 渲染（设计文档 3.2：PDFium FFI，原生级性能）
-  pdfrx: ^1.0.0
-
   # EPUB 渲染（设计文档 3.2：flutter_epub_viewer）
   epub_viewer: ^0.2.0
 

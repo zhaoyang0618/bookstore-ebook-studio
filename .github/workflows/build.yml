@@ -99,7 +99,7 @@ jobs:
       - name: 构建 Windows（Release）
         shell: pwsh
         run: |
-          flutter build windows --release 2>&1 | Tee-Object -FilePath build-windows.log
+          flutter build windows --release --verbose 2>&1 | Tee-Object -FilePath build-windows.log
           if ($LASTEXITCODE -ne 0) {
             Write-Host "=== 构建失败，尾部日志 ==="
             Get-Content build-windows.log -Tail 100
