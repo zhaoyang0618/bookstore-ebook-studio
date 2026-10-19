@@ -707,7 +707,7 @@ void main() {
       // 真实 PDF（xref 流 + 对象流）也必须如此
     }, skip: !hasRealPdf);
 
-    test('真实 PDF 生成的结果首个子段也是 0 1', () {
+    test('真实 PDF（xref 流型）生成的结果也用 xref 流，且自身有条目', () {
       final dir = Directory.systemTemp.createTempSync('pdf_xref0_real');
       final out = '${dir.path}/out.pdf';
       exportInkAnnotations(
@@ -724,11 +724,108 @@ void main() {
       );
       final data = File(out).readAsBytesSync();
       final xrefStart = findLastStartXref(data);
-      final table = String.fromCharCodes(data.sublist(xrefStart, xrefStart + 40));
-      expect(table, startsWith('xref\n0 1\n'));
-      // 且原有交叉引用仍可通过 /Prev 链回到
-      final trailer = String.fromCharCodes(data.sublist(data.length - 300));
-      expect(trailer, contains('/Prev'));
+      // 原文件是 xref 流型，增量更新必须沿用流（CoreGraphics 不接受混用）
+      final reader = PdfFileReader.fromBytes(data);
+      expect(reader.lastSectionIsStream, isTrue);
+      expect(reader.collectPages().length, 338);
+
+      // 交叉引用流必须把自己写进表里，否则严格解析器会认为它是空闲对象，
+      // 报 unable to find /Root dictionary
+      final header = String.fromCharCodes(data.sublist(xrefStart, xrefStart + 24));
+      final xrefNumber = int.parse(RegExp(r'^(\d+)').firstMatch(header)!.group(1)!);
+      final selfEntry = reader.entries[xrefNumber];
+      expect(selfEntry, isNotNull);
+      expect(selfEntry!.type, 1);
+      expect(selfEntry.field1, xrefStart);
+
+      // 原有交叉引用仍可通过 /Prev 链回到
+      // （xref 流没有 trailer 关键字，/Prev 在流的字典里，所以要解析而不是找文本）
+      final prev = reader.trailer['Prev'];
+      expect(prev, isA<PdfNumber>());
+      expect((prev as PdfNumber).value.toInt(), greaterThan(0));
     }, skip: !hasRealPdf);
+  });
+
+  group('交叉引用风格必须与原文件一致（CoreGraphics 兼容性）', () {
+    test('xref 流型输入：输出也用 xref 流', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_style_stream');
+      final src = File('${dir.path}/modern.pdf')..writeAsBytesSync(buildModernPdf());
+      final out = '${dir.path}/out.pdf';
+      exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'x',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(10, 10), const Offset(60, 60)])],
+          ),
+        ],
+      );
+
+      final data = File(out).readAsBytesSync();
+      final xrefStart = findLastStartXref(data);
+      // 该偏移处应是「N 0 obj」而不是经典表的 xref 关键字
+      expect(String.fromCharCodes(data.sublist(xrefStart, xrefStart + 10)), isNot(startsWith('xref')));
+      expect(RegExp(r'^\d+ 0 obj').hasMatch(String.fromCharCodes(data.sublist(xrefStart, xrefStart + 20))),
+          isTrue, reason: 'startxref 应指向交叉引用流对象');
+
+      final reader = PdfFileReader.fromBytes(data);
+      expect(reader.lastSectionIsStream, isTrue);
+      expect(reader.collectPages().length, 1);
+    });
+
+    test('交叉引用流必须包含自己的条目（否则严格解析器认为它是空闲对象）', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_style_self');
+      final src = File('${dir.path}/modern.pdf')..writeAsBytesSync(buildModernPdf());
+      final out = '${dir.path}/out.pdf';
+      exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'x',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(10, 10), const Offset(60, 60)])],
+          ),
+        ],
+      );
+
+      final data = File(out).readAsBytesSync();
+      final xrefStart = findLastStartXref(data);
+      // 从「N 0 obj」里取出 xref 流自己的对象号
+      final header = String.fromCharCodes(data.sublist(xrefStart, xrefStart + 24));
+      final xrefNumber = int.parse(RegExp(r'^(\d+)').firstMatch(header)!.group(1)!);
+
+      final reader = PdfFileReader.fromBytes(data);
+      final selfEntry = reader.entries[xrefNumber];
+      expect(selfEntry, isNotNull, reason: '交叉引用流对象必须在表里有条目');
+      expect(selfEntry!.type, 1);
+      expect(selfEntry.field1, xrefStart, reason: '条目必须指向它自己');
+    });
+
+    test('经典表型输入：输出仍用经典表', () {
+      final dir = Directory.systemTemp.createTempSync('pdf_style_classic');
+      final src = File('${dir.path}/classic.pdf')..writeAsBytesSync(buildClassicPdf());
+      final out = '${dir.path}/out.pdf';
+      exportInkAnnotations(
+        sourcePath: src.path,
+        outputPath: out,
+        pageNumber: 1,
+        annotations: [
+          InkAnnotationInput(
+            id: 'x',
+            color: const Color(0xFFE53935),
+            strokes: [strokeAt([const Offset(10, 10), const Offset(60, 60)])],
+          ),
+        ],
+      );
+      final data = File(out).readAsBytesSync();
+      final xrefStart = findLastStartXref(data);
+      expect(String.fromCharCodes(data.sublist(xrefStart, xrefStart + 5)), 'xref\n');
+      expect(PdfFileReader.fromBytes(data).lastSectionIsStream, isFalse);
+    });
   });
 }

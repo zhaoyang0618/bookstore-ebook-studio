@@ -30,7 +30,7 @@ class XrefEntry {
 
 /// 一个 PDF 文件的读取器。
 class PdfFileReader {
-  PdfFileReader._(this.data, this.entries, this.trailer);
+  PdfFileReader._(this.data, this.entries, this.trailer, this.lastSectionIsStream);
 
   /// 解析整个文件。
   factory PdfFileReader.fromBytes(Uint8List data) {
@@ -48,9 +48,15 @@ class PdfFileReader {
     // 先遇到的（更新的）优先，所以用 putIfAbsent 语义。
     var offset = startXref;
     final visited = <int>{};
+    var lastIsStream = false;
+    var first = true;
     while (offset >= 0 && offset < data.length && visited.add(offset)) {
       final section = _readXrefSection(data, offset);
       if (section == null) break;
+      if (first) {
+        lastIsStream = section.isStream;
+        first = false;
+      }
       section.entries.forEach((number, entry) {
         entries.putIfAbsent(number, () => entry);
       });
@@ -62,7 +68,7 @@ class PdfFileReader {
     if (trailer['Root'] == null) {
       throw PdfSyntaxException('trailer 里找不到 /Root');
     }
-    return PdfFileReader._(data, entries, trailer);
+    return PdfFileReader._(data, entries, trailer, lastIsStream);
   }
 
   /// 从文件读取。
@@ -76,6 +82,13 @@ class PdfFileReader {
 
   /// 合并后的 trailer。
   final Map<String, PdfObject> trailer;
+
+  /// 最后一段交叉引用是**流**（PDF 1.5+）还是经典表。
+  ///
+  /// 增量更新必须沿用同一种风格：CoreGraphics（macOS 预览的引擎）
+  /// 不接受「经典表 + /Prev 指向 xref 流」这种混用，
+  /// 会报 `failed to find start of cross-reference section`。
+  final bool lastSectionIsStream;
 
   final Map<int, PdfObject> _objectCache = {};
   final Map<int, ({Uint8List raw, int first, List<int> offsets})> _objStmCache = {};
@@ -415,7 +428,7 @@ class PdfFileReader {
       }
     }
 
-    return _XrefSection(entries, Map<String, PdfObject>.from(stream.dict.entries));
+    return _XrefSection(entries, Map<String, PdfObject>.from(stream.dict.entries), isStream: true);
   }
 
   static int _lineEnd(Uint8List data, int from) {
@@ -451,9 +464,10 @@ class PdfFileReader {
 }
 
 class _XrefSection {
-  _XrefSection(this.entries, this.trailer);
+  _XrefSection(this.entries, this.trailer, {this.isStream = false});
   final Map<int, XrefEntry> entries;
   final Map<String, PdfObject> trailer;
+  final bool isStream;
 }
 
 /// 解压流的字节（支持 FlateDecode 与 PNG predictor）。
@@ -589,29 +603,32 @@ class PdfIncrementalWriter {
     _buffer.add(utf8.encode('$number 0 obj\n${encodePdfObject(object)}\nendobj\n'));
   }
 
-  /// 写完交叉引用与 trailer，返回完整文件字节。
+  /// 写完交叉引用并返回完整文件字节。
   ///
-  /// [previousStartXref] 是原文件的 `startxref` 值，作为新 trailer 的 `/Prev`。
-  Uint8List finish(int previousStartXref) {
+  /// [previousStartXref] 是原文件的 `startxref` 值，作为 `/Prev`。
+  ///
+  /// **风格必须与原文件一致**：原文件用 xref 流（PDF 1.5+）就继续用流，
+  /// 用经典表就继续用表。混用会让 CoreGraphics（macOS 预览的引擎）
+  /// 直接报 `failed to find start of cross-reference section` 并拒绝打开文件。
+  Uint8List finish(int previousStartXref) =>
+      reader.lastSectionIsStream
+          ? _finishWithXrefStream(previousStartXref)
+          : _finishWithClassicTable(previousStartXref);
+
+  /// 经典交叉引用表（PDF 1.4 及更早的风格）。
+  Uint8List _finishWithClassicTable(int previousStartXref) {
     final startXref = _currentLength;
 
-    // 经典 xref 表：条目必须按对象号升序，每条固定 20 字节。
+    // 条目必须按对象号升序，每条固定 20 字节。
     final numbers = _updatedOffsets.keys.where((n) => n > 0).toList()..sort();
     final out = StringBuffer();
     out.write('xref\n');
 
-    // 关键：第一个子段必须是对象 0 的空闲条目。
-    //
-    // PDF 32000-1 7.5.4 规定「表中的第一条目（对象号 0）应始终为空闲」。
-    // 缺少它时阅读器的处理方式不一致：
-    //   - pypdf 会把**所有对象号整体偏移**第一个子段的起始值（源码里的
-    //     xref_index），导致错位并发出 "not zero-indexed" 警告
-    //   - macOS 预览（PDFKit）更严格，直接拒绝打开文件
-    //   - qpdf / Ghostscript 较宽容，看不出问题
-    // 因此这里始终先写 `0 1` + 空闲条目。
+    // PDF 32000-1 7.5.4：表的第一个子段必须是对象 0 的空闲条目。
+    // 缺少它时 pypdf 会整体偏移对象号，PDFKit 会拒绝打开。
     out.write('0 1\n');
     out.write('0000000000 65535 f \n');
-    // 分段输出（连续的对象号合并成一段）
+
     var i = 0;
     while (i < numbers.length) {
       final start = numbers[i];
@@ -623,26 +640,87 @@ class PdfIncrementalWriter {
       final count = end - start + 1;
       out.write('$start $count\n');
       for (var n = start; n <= end; n++) {
-        final offset = _updatedOffsets[n]!;
-        out.write('${offset.toString().padLeft(10, '0')} 00000 n \n');
+        // 每行必须正好 20 字节：10 位偏移 + 空格 + 5 位代次 + 空格 + 标志 + 空格 + 换行
+        out.write('${_updatedOffsets[n]!.toString().padLeft(10, '0')} 00000 n \n');
       }
       i += 1;
     }
 
-    final newSize = (_nextObjectNumber > reader.size ? _nextObjectNumber : reader.size);
-    final rootRef = reader.root;
     out.write('trailer\n');
-    final trailer = <String, PdfObject>{
-      'Size': PdfNumber(newSize),
-      'Root': rootRef,
-      if (reader.trailer['Info'] != null) 'Info': reader.trailer['Info']!,
-      if (reader.trailer['ID'] != null) 'ID': reader.trailer['ID']!,
-      'Prev': PdfNumber(previousStartXref),
-    };
-    out.write(encodePdfObject(PdfDict(trailer)));
+    out.write(encodePdfObject(PdfDict(_trailerEntries(previousStartXref))));
     out.write('\nstartxref\n$startXref\n%%EOF\n');
 
     _buffer.add(utf8.encode(out.toString()));
     return _buffer.toBytes();
   }
+
+  /// 交叉引用流（PDF 1.5+ 的风格）。
+  ///
+  /// 写一份**完整**的条目表（覆盖 0..Size-1 的所有对象），
+  /// 因此即使原文件的 xref 段读取有问题也能正确解析；
+  /// 同时保留 `/Prev` 指向原段，作为额外的回退路径。
+  Uint8List _finishWithXrefStream(int previousStartXref) {
+    // 先确定 xref 流自己的对象号与偏移：它必须**出现在自己写的表里**，
+    // 否则严格解析器（qpdf / CoreGraphics）会认为该对象是空闲的，
+    // 进而报 `unable to find /Root dictionary` 或直接拒绝打开文件。
+    final xrefNumber = allocate();
+    final xrefOffset = _currentLength;
+    final newSize = _nextObjectNumber > reader.size ? _nextObjectNumber : reader.size;
+
+    // 条目：type(1 字节) + field2(4 字节) + field3(2 字节)
+    final entries = BytesBuilder();
+    void entry(int type, int f1, int f2) {
+      entries.addByte(type & 0xFF);
+      entries.add([(f1 >> 24) & 0xFF, (f1 >> 16) & 0xFF, (f1 >> 8) & 0xFF, f1 & 0xFF]);
+      entries.add([(f2 >> 8) & 0xFF, f2 & 0xFF]);
+    }
+
+    for (var n = 0; n < newSize; n++) {
+      if (n == 0) {
+        entry(0, 0, 65535); // 0 号对象恒为空闲（PDF 32000-1 7.5.4）
+        continue;
+      }
+      if (n == xrefNumber) {
+        entry(1, xrefOffset, 0); // 交叉引用流自身
+        continue;
+      }
+      final mine = _updatedOffsets[n];
+      if (mine != null) {
+        entry(1, mine, 0);
+        continue;
+      }
+      final original = reader.entries[n];
+      if (original != null) {
+        entry(original.type, original.field1, original.field2);
+        continue;
+      }
+      entry(0, 0, 0); // 未使用
+    }
+
+    final compressed = Uint8List.fromList(ZLibEncoder().convert(entries.toBytes()));
+
+    final dict = PdfDict({
+      'Type': const PdfName('XRef'),
+      'Size': PdfNumber(newSize),
+      'W': PdfArray([const PdfNumber(1), const PdfNumber(4), const PdfNumber(2)]),
+      ..._trailerEntries(previousStartXref),
+      'Filter': const PdfName('FlateDecode'),
+      'Length': PdfNumber(compressed.length),
+    });
+
+    _buffer.add(utf8.encode('$xrefNumber 0 obj\n${dict.encode()}\nstream\n'));
+    _buffer.add(compressed);
+    _buffer.add(utf8.encode('\nendstream\nendobj\n'));
+    _buffer.add(utf8.encode('startxref\n$xrefOffset\n%%EOF\n'));
+    return _buffer.toBytes();
+  }
+
+  /// trailer / xref 流字典里共用的条目。
+  Map<String, PdfObject> _trailerEntries(int previousStartXref) => {
+        'Size': PdfNumber(_nextObjectNumber > reader.size ? _nextObjectNumber : reader.size),
+        'Root': reader.root,
+        if (reader.trailer['Info'] != null) 'Info': reader.trailer['Info']!,
+        if (reader.trailer['ID'] != null) 'ID': reader.trailer['ID']!,
+        'Prev': PdfNumber(previousStartXref),
+      };
 }
