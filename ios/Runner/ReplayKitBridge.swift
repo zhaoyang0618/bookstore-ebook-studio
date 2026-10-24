@@ -82,7 +82,7 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
         startedAt = Date()
         recorder.isMicrophoneEnabled = args?["audio"] as? Bool ?? false
 
-        recorder.startCapture(withHandler: { [weak self] sampleBuffer, sampleBufferType, error in
+        recorder.startCapture(handler: { [weak self] sampleBuffer, sampleBufferType, error in
             guard let self else { return }
             if error != nil { return }
             switch sampleBufferType {
