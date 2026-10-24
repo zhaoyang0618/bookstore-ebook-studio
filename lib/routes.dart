@@ -4,7 +4,7 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// 顶层路由。
-enum AppRoute { library, reader, record, translate }
+enum AppRoute { library, reader, notes, record, translate }
 
 /// 当前路由。
 final appRouteProvider = StateProvider<AppRoute>((ref) => AppRoute.library);

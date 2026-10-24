@@ -19,36 +19,14 @@ Tauri 依赖系统 WebView，平板上手写笔延迟和压感支持不如 Flutt
 ```
 ebook-studio/
 ├── lib/
-│   ├── main.dart                    # 入口
-│   ├── app.dart                     # 外壳 + 路由（按宽度切换桌面/平板布局）
-│   ├── models/
-│   │   └── mylibrary_models.dart    # 数据契约的 Dart 镜像（与 TS 版逐字段一致）
-│   ├── engines/
-│   │   └── book_engine.dart         # 统一 BookEngine 接口 + 四种实现
-│   ├── reader/
-│   │   └── reader_page.dart         # 阅读器界面（翻页/进度/位置保存）
-│   ├── library/
-│   │   ├── library_page.dart        # 图书馆界面
-│   │   ├── catalog.dart             # 本地导入：扫描目录 → books/{书名}/
-│   │   └── dangling_card.dart       # 悬空引用卡片（设计文档 1.8.3）
-│   ├── storage/
-│   │   ├── my_library_store.dart    # MyLibrary 本地访问层
-│   │   ├── remote_provider.dart     # RemoteProvider 抽象 + WebDAV/百度适配器
-│   │   └── sync.dart                # 版本对比 / 冲突合并 / 删除语义
-│   ├── features/
-│   │   ├── annotation/
-│   │   │   ├── ink_canvas.dart      # CustomPainter 手写层（矢量笔迹）
-│   │   │   └── annotation_panel.dart
-│   │   ├── translation/
-│   │   │   └── translate_page.dart  # 直连翻译 API，不依赖 dsh
-│   │   └── recorder/
-│   │       └── record_page.dart     # 屏幕录制入口（Platform Channel）
-│   └── ui/
-│       ├── desktop/desktop_layout.dart
-│       └── tablet/tablet_layout.dart
-├── ios/Runner/ReplayKitBridge.swift       # iPad 录制桥接
-├── android/app/src/main/MediaProjectionBridge.kt  # Android 录制桥接
+│   └── …（见上方「目录」）
+├── ios/Runner/ReplayKitBridge.swift       # iPad 录制桥接（ReplayKit 采样缓冲 + AVAssetWriter）
+├── macos/Runner/ScreenRecorderBridge.swift # macOS 录制桥接（AVCaptureScreenInput）
+├── android/app/src/main/kotlin/com/bookstore/ebook_studio/
+│   └── MediaProjectionBridge.kt           # Android 录制桥接（MediaProjection + MediaRecorder + 前台服务）
 ├── test/mylibrary_test.dart               # 数据契约 + 同步 + 跨端互通测试
+├── test/notebook_test.dart                # 笔记本（文件格式 / 撤销重做 / 擦除）
+├── test/recording_test.dart               # 录课落盘（命名 / 元数据 / 仓库）
 └── pubspec.yaml
 ```
 
@@ -62,8 +40,8 @@ ebook-studio/
 | Markdown | flutter_markdown |
 | TXT 分页 | 自研分页器 |
 | 手写标注 | 自研 CustomPainter + 矢量笔迹 |
-| 屏幕录制（桌面） | desktop_screen_recorder |
-| 屏幕录制（平板） | ReplayKit（iOS）/ MediaProjection（Android） |
+| 屏幕录制 | 自研 Platform Channel：AVCaptureScreenInput（macOS）/ ReplayKit（iOS）/ MediaProjection（Android） |
+| 视频回放 | video_player（macOS / iOS / Android） |
 | 本地数据库 | SQLite（drift / sqflite） |
 | 网盘协议 | WebDAV + 百度网盘适配器 |
 | 状态管理 | Riverpod |
@@ -162,6 +140,59 @@ pypdf    → 第 1 页 34 条注释，其中 Ink 2 条
            Rect=[98, 689.89, 302, 743.89]  C=[0.898, 0.2235, 0.2078]
 ```
 
+## 录课（设计文档 3.5，已完整实现）
+
+录的是**整个屏幕**（阅读器 + 手写标注都会被录进去），各端用系统原生管线，无第三方依赖：
+
+| 平台 | 实现 | 输出 | 权限 |
+|---|---|---|---|
+| macOS | `AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（`ScreenRecorderBridge.swift`） | H.264+AAC MP4 | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC「麦克风」 |
+| iOS | ReplayKit `startCapture` 采样缓冲 + `AVAssetWriter`（`ReplayKitBridge.swift`） | H.264+AAC MP4 | 系统录屏弹窗 + 麦克风 |
+| Android | MediaProjection + MediaRecorder + `mediaProjection` 前台服务（`MediaProjectionBridge.kt`） | H.264+AAC MP4 | 系统投屏授权 + 麦克风（运行时请求） |
+| Windows / Linux | 未实现，界面直接给出明确提示 | — | — |
+
+**为什么 iOS 用采样缓冲而不是 `stopRecording` 的预览界面**：预览界面只能
+「存到相册」，拿不到文件路径，元数据（1.7）无从写起。采样缓冲由我们控制
+输出路径，停止后立即得到可用 MP4。
+
+**Android 14+ 的坑**：`getMediaProjection()` 前必须已有 `mediaProjection`
+类型的前台服务在运行，且授权结果必须在用户同意的会话内用掉。因此流程是
+启动前台服务 → 弹系统授权框 → 授权后立刻建投影开录。
+
+### 落盘与元数据（设计文档 1.7）
+
+原生层把视频录到应用沙箱内 → 停止后 Dart 侧（`recording_catalog.dart`）把视频
+挪到最终位置并写**同名 JSON 元数据**：
+
+- 图书馆内的书 → `MyLibrary/books/{书名}/recordings/`（随图书馆同步，
+  `position_at_start` 记录录制时的阅读位置，回看到书里的相关段落）
+- 独立模式 → 应用文档目录 `recordings/`
+
+录课页下方是**录制记录**列表：时长 / 大小 / 文件名，可回放（`video_player`）
+与删除（视频 + 元数据一起删）。
+
+## 笔记本（GoodNotes / Notability 风格手写笔记）
+
+导航栏「笔记」进入。一本笔记本一个 JSON 文件（`MyLibrary/notebooks/{id}.notebook.json`，
+未配图书馆时存应用文档目录），笔迹与阅读器批注共用同一套矢量结构
+（`InkStroke`：点 + 压力 + 时间戳），页面坐标为 A4 @150dpi（1240 × 1754）。
+
+**功能清单**：
+
+- 笔记本图书馆：彩色封面卡片、新建（标题 / 封面色 / 纸张模板）、重命名、删除
+- 纸张模板：空白 / 横线（带红色页边线）/ 方格 / 点阵（按页可换）
+- 笔：钢笔 / 记号笔 / 荧光笔（multiply 混合，底下文字透出来）/ **笔画橡皮**
+- 6 色调色板 + 3 档粗细；压感来自硬件（Apple Pencil / 触控笔）
+- 撤销 / 重做（每页独立记录，**连续擦除拖动合并为一次撤销**）
+- 多页管理：加页（沿用当前页模板）、删页、翻页、页码指示
+- 手势：**单指写、双指平移缩放**、滚轮以光标为中心缩放（桌面）
+- 自动保存：改动后 800ms 防抖落盘（原子写：临时文件 + 改名），关页即存
+
+**为什么不用 `InteractiveViewer`**：它的单指平移手势和手写竞争（阅读器里
+靠 `AbsorbPointer` 二选一，笔记必须「单指写、双指移」同时成立）。这里自己
+维护 `TransformationController`，框架层 `Transform` 只做呈现 —— 指针坐标
+由命中测试逆变换回**笔记页坐标**，笔迹按页坐标存储，与缩放无关。
+
 ## 多平台构建（GitHub Actions）
 
 本地只有 Command Line Tools 没有 Xcode，macOS/iOS 构建交给 GitHub Actions。
@@ -257,7 +288,7 @@ A problem occurred configuring project ':epub_viewer'.
 
 ```
 flutter analyze   → No issues found!
-flutter test      → 50 个测试全部通过
+flutter test      → 147 个测试全部通过
 ```
 
 测试覆盖：
@@ -267,6 +298,8 @@ flutter test      → 50 个测试全部通过
 - 同步请求队列、删除语义（四种）
 - Wiki 解析（含 YAML 块状列表）、序列化往返、图谱出链反链
 - 扫描导入、笔记边车、录课元数据、迁移备份
+- 录课落盘（文件命名、元数据构造、仓库导入/列出/删除、悬空视频引用）
+- 笔记本（文件格式往返、撤销/重做、连续擦除合并撤销、页面结构、擦除命中）
 - 引擎（工厂分派、TXT 分页、Markdown 目录、边车路径推导）
 - **跨端数据互通**：两个客户端（dsh-macos / flutter-ipad）读写同一份 MyLibrary
 

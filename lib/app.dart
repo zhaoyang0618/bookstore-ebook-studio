@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../library/library_page.dart';
 import '../reader/reader_page.dart';
+import '../features/notebook/notes_page.dart';
 import '../features/recorder/record_page.dart';
 import '../features/translation/translate_page.dart';
 import 'routes.dart';
@@ -46,6 +47,7 @@ class _ResponsiveShell extends StatelessWidget {
     final body = switch (route) {
       AppRoute.library => const LibraryPage(),
       AppRoute.reader => const ReaderPage(),
+      AppRoute.notes => const NotesPage(),
       AppRoute.record => const RecordPage(),
       AppRoute.translate => const TranslatePage(),
     };

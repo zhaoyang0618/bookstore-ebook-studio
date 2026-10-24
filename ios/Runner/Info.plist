@@ -24,6 +24,9 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- 录课（设计文档 3.5）：ReplayKit 采样缓冲里带麦克风音频轨 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>录制讲解视频时需要使用麦克风采集您的解说音频</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

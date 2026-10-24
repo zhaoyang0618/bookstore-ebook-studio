@@ -23,6 +23,7 @@ class TabletLayout extends ConsumerWidget {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.library_books_outlined), selectedIcon: Icon(Icons.library_books), label: '图书馆'),
           NavigationDestination(icon: Icon(Icons.menu_book_outlined), selectedIcon: Icon(Icons.menu_book), label: '阅读'),
+          NavigationDestination(icon: Icon(Icons.draw_outlined), selectedIcon: Icon(Icons.draw), label: '笔记'),
           NavigationDestination(icon: Icon(Icons.videocam_outlined), selectedIcon: Icon(Icons.videocam), label: '录课'),
           NavigationDestination(icon: Icon(Icons.translate_outlined), selectedIcon: Icon(Icons.translate), label: '翻译'),
         ],

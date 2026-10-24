@@ -336,6 +336,9 @@ void main() {
     test('真实 PDF：导出后页数不变，注释可见', () {
       final dir = Directory.systemTemp.createTempSync('pdf_ink_real');
       final out = '${dir.path}/out.pdf';
+      // 记录导出前的大小，结尾对比 —— 不硬编码字节数：
+      // 样本本身可能被「写入 PDF 原生注释」功能真实修改过（那是有意的）
+      final originalSize = File(kRealPdf).lengthSync();
 
       final result = exportInkAnnotations(
         sourcePath: kRealPdf,
@@ -363,8 +366,8 @@ void main() {
       expect((last['Subtype'] as PdfName).name, 'Ink');
       expect((last['InkList'] as PdfArray).items.length, 1);
 
-      // 原文件未被改动
-      expect(File(kRealPdf).lengthSync(), 1506800);
+      // 原文件未被本次导出改动
+      expect(File(kRealPdf).lengthSync(), originalSize, reason: '原文件未被改动');
     }, skip: !hasRealPdf);
 
     test('页码越界时报错而不是写坏文件', () {
@@ -473,6 +476,7 @@ void main() {
       final dir = Directory.systemTemp.createTempSync('pdf_write_real');
       final target = File('${dir.path}/real.pdf')
         ..writeAsBytesSync(File(kRealPdf).readAsBytesSync());
+      final originalSampleSize = File(kRealPdf).lengthSync();
 
       final result = writeInkIntoPdfSync(
         pdfPath: target.path,
@@ -490,8 +494,8 @@ void main() {
 
       final reader = PdfFileReader.fromBytes(target.readAsBytesSync());
       expect(reader.collectPages().length, 338);
-      // 原工作区样本未被改动
-      expect(File(kRealPdf).lengthSync(), 1506800);
+      // 原工作区样本未被本次写回改动
+      expect(File(kRealPdf).lengthSync(), originalSampleSize, reason: '原文件未被改动');
     }, skip: !hasRealPdf);
   });
 

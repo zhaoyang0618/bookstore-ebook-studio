@@ -25,6 +25,7 @@ class DesktopLayout extends ConsumerWidget {
             destinations: const [
               NavigationRailDestination(icon: Icon(Icons.library_books_outlined), selectedIcon: Icon(Icons.library_books), label: Text('图书馆')),
               NavigationRailDestination(icon: Icon(Icons.menu_book_outlined), selectedIcon: Icon(Icons.menu_book), label: Text('阅读器')),
+              NavigationRailDestination(icon: Icon(Icons.draw_outlined), selectedIcon: Icon(Icons.draw), label: Text('笔记')),
               NavigationRailDestination(icon: Icon(Icons.videocam_outlined), selectedIcon: Icon(Icons.videocam), label: Text('录课')),
               NavigationRailDestination(icon: Icon(Icons.translate_outlined), selectedIcon: Icon(Icons.translate), label: Text('翻译')),
             ],

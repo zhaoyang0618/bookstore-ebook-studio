@@ -139,6 +139,29 @@ class InkStroke {
     }
     return const Color(0xFFE53935);
   }
+
+  /// 值相等（颜色 / 线宽 / 线端 / 逐点相等）。
+  ///
+  /// 笔迹是值对象：测试断言、去重、撤销恢复都依赖按值比较；
+  /// 「同一实例」的判断另有 [identical]。
+  @override
+  bool operator ==(Object other) =>
+      other is InkStroke &&
+      other.color == color &&
+      other.width == width &&
+      other.cap == cap &&
+      _listEquals(other.points, points);
+
+  @override
+  int get hashCode => Object.hash(color, width, cap, Object.hashAll(points));
+
+  static bool _listEquals(List<InkPoint> a, List<InkPoint> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }
 
 /// 笔迹中的一个点。
@@ -162,6 +185,13 @@ class InkPoint {
         pressure: (json['pressure'] as num?)?.toDouble() ?? 1,
         t: (json['t'] as num?)?.toInt() ?? 0,
       );
+
+  @override
+  bool operator ==(Object other) =>
+      other is InkPoint && other.x == x && other.y == y && other.pressure == pressure && other.t == t;
+
+  @override
+  int get hashCode => Object.hash(x, y, pressure, t);
 }
 
 /// 手写标注画布。
