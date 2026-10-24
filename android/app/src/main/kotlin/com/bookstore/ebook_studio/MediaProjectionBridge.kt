@@ -123,14 +123,17 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     }
 
     private fun startProjection(resultCode: Int, data: Intent) {
+        // 新版 SDK 里 getMediaProjection 标注了 @Nullable（前台服务未就绪/权限被收回时返回 null）
         val projection = projectionManager.getMediaProjection(resultCode, data)
+            ?: throw IllegalStateException("无法获取 MediaProjection（授权会话无效或前台服务未就绪）")
         this.projection = projection
-        if (Build.VERSION.SDK_INT >= 34) {
-            // 用户从系统面板停止投屏时也要收尾
-            projection.registerScreenCaptureCallback(Handler(Looper.getMainLooper())) {
+        // 用户从系统面板停止投屏时也要收尾（registerCallback 自 API 21 就有，
+        // 不用 API 34 的 registerScreenCaptureCallback —— 它不在当前 compileSdk 里）
+        projection.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
                 if (recording) activity.runOnUiThread { selfStop() }
             }
-        }
+        }, Handler(Looper.getMainLooper()))
 
         val metrics = screenSize()
         val dir = File(activity.filesDir, "recordings").apply { mkdirs() }
