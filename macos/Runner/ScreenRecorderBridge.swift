@@ -49,8 +49,6 @@ class ScreenRecorderBridge: NSObject, FlutterPlugin {
             result(FlutterError(code: "ALREADY_RECORDING", message: "已经在录制中", details: nil))
             return
         }
-        // .inputPriority：不裁剪分辨率，按屏幕原生尺寸录（须在添加输入前设置）
-        session.sessionPreset = .inputPriority
         if #available(macOS 10.15, *) {
             if !CGPreflightScreenCaptureAccess() {
                 // 触发系统弹窗；本轮内拿不到授权，让用户开完后重试

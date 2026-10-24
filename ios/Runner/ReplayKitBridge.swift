@@ -178,7 +178,9 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
         guard let writer else { return }
         let url = outputURL
         let duration = startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
-        writer.markAsFinished()
+        // 先标记两条轨道不再收数据，finishWriting 才会正常收尾
+        videoInput?.markAsFinished()
+        audioInput?.markAsFinished()
         writer.finishWriting { [weak self] in
             guard let self else { return }
             let success = writer.status == .completed
