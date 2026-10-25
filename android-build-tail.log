@@ -1,0 +1,41 @@
+Running Gradle task 'assembleRelease'...                        
+Checking the license for package NDK (Side by side) 27.0.12077973 in /usr/local/lib/android/sdk/licenses
+License for package NDK (Side by side) 27.0.12077973 accepted.
+Preparing "Install NDK (Side by side) 27.0.12077973 v.27.0.12077973".
+"Install NDK (Side by side) 27.0.12077973 v.27.0.12077973" ready.
+Installing NDK (Side by side) 27.0.12077973 in /usr/local/lib/android/sdk/ndk/27.0.12077973
+"Install NDK (Side by side) 27.0.12077973 v.27.0.12077973" complete.
+"Install NDK (Side by side) 27.0.12077973 v.27.0.12077973" finished.
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 8104 bytes (99.5% reduction). Tree-shaking can be disabled by providing the --no-tree-shake-icons flag when building your app.
+Checking the license for package CMake 3.22.1 in /usr/local/lib/android/sdk/licenses
+License for package CMake 3.22.1 accepted.
+Preparing "Install CMake 3.22.1 v.3.22.1".
+"Install CMake 3.22.1 v.3.22.1" ready.
+Installing CMake 3.22.1 in /usr/local/lib/android/sdk/cmake/3.22.1
+"Install CMake 3.22.1 v.3.22.1" complete.
+"Install CMake 3.22.1 v.3.22.1" finished.
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+Note: Some input files use unchecked or unsafe operations.
+Note: Recompile with -Xlint:unchecked for details.
+Caught exception: Already watching path: /home/runner/work/bookstore-ebook-studio/bookstore-ebook-studio/android
+e: file:///home/runner/work/bookstore-ebook-studio/bookstore-ebook-studio/android/app/src/main/kotlin/com/bookstore/ebook_studio/MediaProjectionBridge.kt:124:58 Unresolved reference 'DisplayConfig'.
+e: file:///home/runner/work/bookstore-ebook-studio/bookstore-ebook-studio/android/app/src/main/kotlin/com/bookstore/ebook_studio/MediaProjectionBridge.kt:125:64 Unresolved reference 'DisplayMirrorMode'.
+e: file:///home/runner/work/bookstore-ebook-studio/bookstore-ebook-studio/android/app/src/main/kotlin/com/bookstore/ebook_studio/MediaProjectionBridge.kt:127:73 Unresolved reference 'createFromDisplayConfig'.
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileReleaseKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 3m 59s
+Running Gradle task 'assembleRelease'...                          241.2s
+Gradle task assembleRelease failed with exit code 1
