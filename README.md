@@ -148,7 +148,7 @@ pypdf    → 第 1 页 34 条注释，其中 Ink 2 条
 | 平台 | 范围 | 实现 | 权限 |
 |---|---|---|---|
 | iOS | 仅本应用窗口 | `drawHierarchy` 逐帧渲染自己的视图树 → `AVAssetWriter`（H.264）；麦克风 `AVAudioRecorder` 单独录 m4a，停止后 `AVMutableComposition` passthrough 合成（`ReplayKitBridge.swift`） | 只需麦克风（**不需要**屏幕录制权限） |
-| Android 14+ | 仅本应用窗口 | MediaProjection `MIRROR_MODE_APP_ONLY` + MediaRecorder（`MediaProjectionBridge.kt`）；**只做 14+** —— 窗口级镜像靠它，低版本直接提示不支持 | 系统投屏授权 + 麦克风 |
+| Android 14+ | 用户在系统弹窗里选 | MediaProjection + MediaRecorder + `mediaProjection` 前台服务（`MediaProjectionBridge.kt`）；**只做 14+** —— 系统授权框自带「单个应用 / 整个屏幕」选择（API 34 的 app screen sharing），App 侧没有强制只录本应用的 API，低版本直接提示不支持 | 系统投屏授权 + 麦克风 |
 | Windows | 仅本应用窗口 | `PrintWindow(PW_RENDERFULLCONTENT)` 逐帧抓取（Flutter 是 ANGLE/D3D 渲染，必须带此 flag）+ Media Foundation SinkWriter 编码 H.264（`windows/runner/recorder_bridge.cpp`，纯 Win32/COM，不引 C++/WinRT）；v1 暂不含音频 | 无需额外权限 |
 | macOS | 整个屏幕 | `AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（`ScreenRecorderBridge.swift`） | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC「麦克风」 |
 | Linux | 未实现 | 界面直接给出明确提示（规划：PipeWire） | — |

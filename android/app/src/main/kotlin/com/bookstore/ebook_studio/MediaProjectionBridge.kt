@@ -119,20 +119,17 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     /**
      * 先起前台服务（Android 14 要求在 getMediaProjection 之前），再弹系统授权框。
      *
-     * 只支持 Android 14+：MIRROR_MODE_APP_ONLY（API 34）才能只镜像本应用窗口；
-     * 更低版本直接报错（Dart 侧会提前拦截并说明）。
+     * 只支持 Android 14+：系统的授权框自带「单个应用 / 整个屏幕」选择
+     * （API 34 的 app screen sharing）—— 录制范围由用户在系统框里挑，
+     * App 侧没有强制「只录本应用」的 API。
      */
     private fun launchConsent() {
         if (Build.VERSION.SDK_INT < 34) {
-            finishStartWithError("REQUIRES_ANDROID_14", "录制仅支持 Android 14 及以上（只录本应用窗口）")
+            finishStartWithError("REQUIRES_ANDROID_14", "录制仅支持 Android 14 及以上")
             return
         }
         RecordingForegroundService.start(activity)
-        val displayConfig = android.media.projection.DisplayConfig.Builder()
-            .setDisplayMirrorMode(android.media.projection.DisplayMirrorMode.MIRROR_MODE_APP_ONLY)
-            .build()
-        val config = android.media.projection.MediaProjectionConfig.createFromDisplayConfig(displayConfig)
-        activity.startActivityForResult(projectionManager.createScreenCaptureIntent(config), REQUEST_CODE_PROJECTION)
+        activity.startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CODE_PROJECTION)
     }
 
     private fun startProjection(resultCode: Int, data: Intent) {
@@ -183,12 +180,12 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     private class ScreenSize(val width: Int, val height: Int, val densityDpi: Int)
 
     private fun screenSize(): ScreenSize {
-        // 只支持 Android 14+（MIRROR_MODE_APP_ONLY）→ 虚拟屏尺寸取**当前窗口**
-        // 而非整块屏幕；仅保证宽高为偶数（编码器要求）
+        // 虚拟屏取整块屏幕的最大尺寸（用户在系统框选「单个应用」时，
+        // 系统会把应用窗口缩放进这个虚拟屏）；宽高取偶（编码器要求）
         val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val dm = activity.resources.displayMetrics
         return if (Build.VERSION.SDK_INT >= 30) {
-            val bounds = wm.currentWindowMetrics.bounds
+            val bounds = wm.maximumWindowMetrics.bounds
             val w = bounds.width() - (bounds.width() % 2)
             val h = bounds.height() - (bounds.height() % 2)
             ScreenSize(w, h, dm.densityDpi)

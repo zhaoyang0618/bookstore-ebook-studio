@@ -5,8 +5,9 @@
 ///   `macos/Runner/ScreenRecorderBridge.swift`）
 /// - iOS：**仅录本应用窗口** —— `drawHierarchy` 逐帧渲染自己的视图树 +
 ///   `AVAssetWriter`，不需要屏幕录制权限（见 `ios/Runner/ReplayKitBridge.swift`）
-/// - Android：**仅 Android 14+**，MediaProjection `MIRROR_MODE_APP_ONLY`
-///   只镜像本应用窗口 + MediaRecorder（见 `MediaProjectionBridge.kt`）
+/// - Android：**仅 Android 14+**，MediaProjection + MediaRecorder；系统
+///   授权框自带「单个应用 / 整个屏幕」选择（录制范围由用户挑）
+///   （见 `MediaProjectionBridge.kt`）
 /// - Windows：**仅录本应用窗口** —— `PrintWindow` 逐帧抓取 +
 ///   Media Foundation 编码 H.264（见 `windows/runner/recorder_bridge.cpp`；
 ///   v1 暂不含音频）
@@ -151,7 +152,7 @@ class _RecordPageState extends ConsumerState<RecordPage> {
   String get _captureScopeText {
     if (Platform.isIOS || Platform.isWindows) return '仅录制本应用窗口的内容';
     if (Platform.isMacOS) return '录制整个屏幕（阅读器 + 手写标注都会被录进去）';
-    if (Platform.isAndroid) return '仅录制本应用窗口的内容';
+    if (Platform.isAndroid) return '开始时在系统弹窗里选择「单个应用」或「整个屏幕」';
     return '';
   }
 
