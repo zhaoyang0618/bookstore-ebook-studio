@@ -88,6 +88,50 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
 
   bool _recordingMode = false;
 
+  // ---- 双指 / 触控板手势（在**窗口层**处理：光标落在工具栏、标题栏
+  // 附近时事件也要能平移 —— v0.9.8 日志显示上滑事件因光标位置丢失） ----
+  double _panZoomScale = 1;
+
+  void _onPanZoomStart(PointerPanZoomStartEvent event) {
+    AppLog.log('panzoom', 'ROOT START id=${event.pointer} pos=${_fmt(event.position)} device=${event.kind}');
+    _panZoomScale = 1;
+  }
+
+  void _onPanZoomUpdate(PointerPanZoomUpdateEvent event) {
+    AppLog.log('panzoom',
+        'ROOT UPDATE id=${event.pointer} panDelta=${_fmt(event.panDelta)} scale=${event.scale.toStringAsFixed(3)} pos=${_fmt(event.position)}');
+    if (event.panDelta != Offset.zero) {
+      _panBy(event.panDelta);
+    }
+    // event.scale 是手势开始以来的累计缩放，换算成这一帧的比率
+    if (event.scale > 0 && _panZoomScale > 0 && event.scale != _panZoomScale) {
+      _zoomAboutGlobal(event.position, event.scale / _panZoomScale);
+      _panZoomScale = event.scale;
+    }
+  }
+
+  void _onPanZoomEnd(PointerPanZoomEndEvent event) {
+    AppLog.log('panzoom', 'ROOT END id=${event.pointer}');
+  }
+
+  void _onRootPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final ctrl =
+        HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
+    AppLog.log('scroll', 'ROOT delta=${_fmt(event.scrollDelta)} ctrl=$ctrl pos=${_fmt(event.position)}');
+    if (ctrl) {
+      if (event.scrollDelta.dy != 0) {
+        final ratio = event.scrollDelta.dy > 0 ? 1 / 1.1 : 1.1;
+        _zoomAboutGlobal(event.position, ratio);
+      }
+      return;
+    }
+    if (event.scrollDelta != Offset.zero) {
+      // 经典滚轮语义：向下滚（dy>0）= 看更低的内容 = 纸向上移
+      _panBy(-event.scrollDelta);
+    }
+  }
+
   /// 视口（Transform 的父级坐标空间），滚轮缩放锚点换算用。
   final GlobalKey _viewportKey = GlobalKey();
 
@@ -361,9 +405,14 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   @override
   Widget build(BuildContext context) {
     final notebook = _session.notebook;
-    return Scaffold(
-      appBar: AppBar(
-        leading: BackButton(onPressed: () => Navigator.pop(context)),
+    return Listener(
+      onPointerPanZoomStart: _onPanZoomStart,
+      onPointerPanZoomUpdate: _onPanZoomUpdate,
+      onPointerPanZoomEnd: _onPanZoomEnd,
+      onPointerSignal: _onRootPointerSignal,
+      child: Scaffold(
+        appBar: AppBar(
+          leading: BackButton(onPressed: () => Navigator.pop(context)),
         title: GestureDetector(
           onTap: _rename,
           child: Row(
@@ -462,7 +511,6 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
                               tool: _tool,
                               color: _color,
                               widthScale: _widthScale,
-                              transform: _transform,
                               onZoom: _zoomAboutGlobal,
                               onPan: _panBy,
                             ),
@@ -522,6 +570,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
           },
         ),
       ),
+      ),
     );
   }
 }
@@ -534,7 +583,6 @@ class _NotebookPageView extends StatefulWidget {
     required this.tool,
     required this.color,
     required this.widthScale,
-    required this.transform,
     required this.onZoom,
     required this.onPan,
   });
@@ -544,7 +592,6 @@ class _NotebookPageView extends StatefulWidget {
   final NotebookTool tool;
   final Color color;
   final double widthScale;
-  final TransformationController transform;
   final void Function(Offset center, double ratio) onZoom;
 
   /// 滚轮 / 触控板滚动 → 视口内平移。
@@ -563,10 +610,6 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   final Map<int, Offset> _pointers = {};
   Offset? _gestureMid;
   double? _gestureSpan;
-
-  /// 触控板手势的累计缩放（PointerPanZoomUpdateEvent.scale 是累计值，
-  /// 逐帧换算成比率用）。
-  double _panZoomScale = 1;
 
   /// 是否处于一段连续的擦除拖动中（合并撤销记录）。
   bool _erasing = false;
@@ -752,24 +795,6 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     _gestureSpan = span;
   }
 
-  /// 滚轮：平移（纵向为主）；Ctrl / ⌘ + 滚轮以光标为中心缩放。
-  void _onPointerSignal(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    final ctrl = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
-    AppLog.log('scroll', 'delta=${_fmt(event.scrollDelta)} ctrl=$ctrl pos=${_fmt(event.position)}');
-    if (ctrl) {
-      if (event.scrollDelta.dy != 0) {
-        final ratio = event.scrollDelta.dy > 0 ? 1 / 1.1 : 1.1;
-        widget.onZoom(event.position, ratio);
-      }
-      return;
-    }
-    if (event.scrollDelta != Offset.zero) {
-      // 经典滚轮语义：向下滚（dy>0）= 看更低的内容 = 纸向上移
-      widget.onPan(-event.scrollDelta);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final page = widget.session.notebook.pages[widget.pageIndex];
@@ -780,29 +805,6 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       onPointerMove: _onPointerMove,
       onPointerUp: _onPointerUp,
       onPointerCancel: _onPointerUp,
-      onPointerSignal: _onPointerSignal,
-      onPointerPanZoomStart: (event) {
-        // 触控板双指手势（macOS / Windows）→ 平移 + 缩放
-        AppLog.log('panzoom', 'START id=${event.pointer} pos=${_fmt(event.position)} device=${event.kind}');
-        _gestureMid = event.position;
-        _panZoomScale = 1;
-      },
-      onPointerPanZoomUpdate: (event) {
-        _gestureMid = _gestureMid ?? event.position;
-        AppLog.log('panzoom', 'UPDATE id=${event.pointer} panDelta=${_fmt(event.panDelta)} scale=${event.scale.toStringAsFixed(3)} pos=${_fmt(event.position)}');
-        if (event.panDelta != Offset.zero) {
-          widget.onPan(event.panDelta);
-        }
-        // event.scale 是手势开始以来的累计缩放，换算成这一帧的比率
-        if (event.scale > 0 && _panZoomScale > 0 && event.scale != _panZoomScale) {
-          widget.onZoom(event.position, event.scale / _panZoomScale);
-          _panZoomScale = event.scale;
-        }
-      },
-      onPointerPanZoomEnd: (event) {
-        AppLog.log('panzoom', 'END id=${event.pointer}');
-        _gestureMid = null;
-      },
       child: CustomPaint(
         painter: _NotebookPaperPainter(template: page.template, pageSize: _pageSize),
         isComplex: true,
