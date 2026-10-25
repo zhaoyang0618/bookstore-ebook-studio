@@ -228,14 +228,22 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     return m;
   }
 
-  /// 视口内平移（滚轮 / 触控板），随后钳制边界。
-  void _panBy(Offset delta) {
-    final ops = Matrix4.identity()..translateByDouble(-delta.dx, -delta.dy, 0, 1);
+  /// 视口内平移：纸移动 [contentDelta]（**跟随手指 / 光标**），随后钳制边界。
+  ///
+  /// 各调用方传的量：
+  /// - 触控板 pan-zoom：+panDelta（macOS 的 delta 已含用户的自然滚动设置，
+  ///   跟随手指 = GoodNotes 行为。v0.9.7 之前这里取反了方向，用户的滑动
+  ///   全被钳在页面顶部，看起来「滑动没有效果」）
+  /// - 移动工具拖动：+光标位移（纸跟着光标走）
+  /// - 滚轮：-scrollDelta（经典滚轮语义：向下滚 = 看更低的内容）
+  void _panBy(Offset contentDelta) {
+    final ops = Matrix4.identity()
+      ..translateByDouble(contentDelta.dx, contentDelta.dy, 0, 1);
     ops.multiply(_transform.value);
     _transform.value = ops;
     _clampPan();
     final t = _transform.value.getTranslation();
-    AppLog.log('pan', 'by=${_fmt(delta)} -> translation=(${t.x.toStringAsFixed(1)}, ${t.y.toStringAsFixed(1)}) scale=${_transform.value.getMaxScaleOnAxis().toStringAsFixed(3)}');
+    AppLog.log('pan', 'by=${_fmt(contentDelta)} -> translation=(${t.x.toStringAsFixed(1)}, ${t.y.toStringAsFixed(1)}) scale=${_transform.value.getMaxScaleOnAxis().toStringAsFixed(3)}');
   }
 
   /// 平移边界钳制：放大到能覆盖视口时，纸**不允许被拖出视野**
@@ -757,7 +765,8 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       return;
     }
     if (event.scrollDelta != Offset.zero) {
-      widget.onPan(event.scrollDelta);
+      // 经典滚轮语义：向下滚（dy>0）= 看更低的内容 = 纸向上移
+      widget.onPan(-event.scrollDelta);
     }
   }
 

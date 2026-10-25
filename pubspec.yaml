@@ -1,7 +1,7 @@
 name: ebook_studio
 description: 跨平台电子书阅读与知识管理软件 — Flutter 版（设计文档第三部分）
 publish_to: "none"
-version: 0.9.7
+version: 0.9.8
 
 environment:
   sdk: ">=3.8.0 <4.0.0"
