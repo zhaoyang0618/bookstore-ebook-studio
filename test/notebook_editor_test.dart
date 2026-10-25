@@ -82,6 +82,26 @@ void main() {
     expect(origin.dy + kNotebookPageSize.height * scaleBefore, greaterThanOrEqualTo(900.0));
   });
 
+  testWidgets('视口下部的点击也能画线（回归：OverflowBox 尺寸检查死区）', (tester) async {
+    await pumpEditor(tester);
+    // body 高 272（444 − appbar − 工具栏）：页面坐标 y > 272 的区域在
+    // 旧实现中命中测试失败（OverflowBox 自身尺寸不含页面下半部）——
+    // 用户「滑动到下面之后下面画不了线」的根因
+    final start = const Offset(400, 276); // 视图坐标：body y=220 → 页面 y≈341
+
+    final down = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(down.down(start, buttons: kPrimaryMouseButton));
+    await tester.sendEventToBinding(down.move(start + const Offset(40, 30), buttons: kPrimaryMouseButton));
+    await tester.sendEventToBinding(down.up());
+    await tester.pump(const Duration(seconds: 1)); // 自动保存落盘
+
+    final strokes = store.read(notebook.id)!.pages.first.strokes;
+    expect(strokes, isNotEmpty, reason: '视口下部的点击应能画线');
+    final points = strokes.first['points'] as List;
+    final firstY = (points.first as Map)['y'] as num;
+    expect(firstY, greaterThan(272), reason: '笔迹应在页面坐标 y > 视口高的区域（旧实现死区）');
+  });
+
   testWidgets('有按键的 mouse 拖动画线（回归：真实点击仍可画）', (tester) async {
     await pumpEditor(tester);
     final center = tester.getCenter(find.byType(NotebookEditorPage));

@@ -92,6 +92,45 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   // 附近时事件也要能平移 —— v0.9.8 日志显示上滑事件因光标位置丢失） ----
   double _panZoomScale = 1;
 
+  // ---- 手写捕获（视口层，坐标经矩阵逆变换换算为页面坐标） ----
+  final Map<int, Offset> _pointers = {};
+  Offset? _gestureMid;
+  double? _gestureSpan;
+  InkStroke? _current;
+  DateTime? _strokeStart;
+  bool _erasing = false;
+  int? _panPointer;
+  Offset? _lastPanPosition;
+
+  bool get _isEraser => _tool == NotebookTool.eraser;
+  bool get _isPanTool => _tool == NotebookTool.pan;
+
+  double get _strokeWidth {
+    final base = switch (_tool) {
+      NotebookTool.pen => 2.0,
+      NotebookTool.marker => 5.0,
+      NotebookTool.highlighter => 16.0,
+      NotebookTool.eraser => 2.0,
+      NotebookTool.pan => 0.0, // 不画线，不会走到
+    };
+    return base * _widthScale;
+  }
+
+  Color get _strokeColor {
+    final opacity = _tool == NotebookTool.highlighter ? 0.35 : 1.0;
+    return _color.withValues(alpha: opacity);
+  }
+
+  /// 视口坐标 → 笔记页坐标（矩阵逆变换；捕获层与 Transform 同原点同尺寸）。
+  Offset _viewportToPage(Offset viewport) =>
+      MatrixUtils.transformPoint(Matrix4.inverted(_transform.value), viewport);
+
+  bool _pageContains(Offset page) =>
+      page.dx >= 0 &&
+      page.dy >= 0 &&
+      page.dx <= _session.notebook.pageWidth &&
+      page.dy <= _session.notebook.pageHeight;
+
   void _onPanZoomStart(PointerPanZoomStartEvent event) {
     AppLog.log('panzoom', 'ROOT START id=${event.pointer} pos=${_fmt(event.position)} device=${event.kind}');
     _panZoomScale = 1;
@@ -112,6 +151,160 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
 
   void _onPanZoomEnd(PointerPanZoomEndEvent event) {
     AppLog.log('panzoom', 'ROOT END id=${event.pointer}');
+  }
+
+  // ---- 手写捕获（视口层） ----
+
+  void _onViewportPointerDown(PointerDownEvent event) {
+    AppLog.log('ptr',
+        'DOWN kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} pressure=${event.pressure.toStringAsFixed(2)} buttons=${event.buttons}');
+    // 触控板「直接触摸」指针不参与任何交互（画线 / 双指逻辑都不进）：
+    // macOS 双指滑动时而被路由成裸指针，参与画线就会误画。
+    if (event.kind == PointerDeviceKind.trackpad) {
+      AppLog.log('ptr', 'DOWN -> ignored (trackpad)');
+      return;
+    }
+    _pointers[event.pointer] = event.position;
+    // 第二根手指落下：取消正在画的笔（两指 = 平移/缩放手势）
+    if (_pointers.length == 2 && _current != null) {
+      _current = null;
+      _strokeStart = null;
+    }
+    if (_pointers.length == 2) {
+      final points = _pointers.values.toList();
+      _gestureMid = Offset(
+        (points[0].dx + points[1].dx) / 2,
+        (points[0].dy + points[1].dy) / 2,
+      );
+      _gestureSpan = (points[0] - points[1]).distance;
+      return;
+    }
+    if (_pointers.length > 2 || _current != null) return;
+
+    // **没有按下任何按键**的 mouse down（macOS 会把双指滑动合成这种
+    // 「拖动」，光标甚至移出窗口）—— 不是真实点击，一律忽略。
+    if (event.kind == PointerDeviceKind.mouse && event.buttons == 0) {
+      AppLog.log('ptr', 'DOWN -> ignored (mouse buttons=0, synthesized drag)');
+      return;
+    }
+
+    // 移动模式：拖动 = 平移画布，不能画线
+    if (_isPanTool) {
+      _panPointer = event.pointer;
+      _lastPanPosition = event.position;
+      AppLog.log('ptr', 'DOWN -> pan-drag start id=${event.pointer} at=${_fmt(event.position)}');
+      return;
+    }
+
+    final pagePos = _viewportToPage(event.localPosition);
+    if (_isEraser) {
+      _erasing = true;
+      AppLog.log('ptr', 'DOWN -> erase-drag start id=${event.pointer} page=${_fmt(pagePos)}');
+      if (_pageContains(pagePos)) {
+        _session.eraseAt(_session.currentPage, pagePos, _eraserRadius);
+      }
+      return;
+    }
+
+    // 起笔必须在纸上（纸外的点不属于任何页面）
+    if (!_pageContains(pagePos)) {
+      AppLog.log('ptr', 'DOWN -> ignored (outside page) page=${_fmt(pagePos)}');
+      return;
+    }
+    _strokeStart = DateTime.now();
+    _current = InkStroke(
+      color: _strokeColor,
+      width: _strokeWidth,
+      cap: _tool == NotebookTool.highlighter ? StrokeCap.square : StrokeCap.round,
+      points: [
+        InkPoint(x: pagePos.dx, y: pagePos.dy, t: 0),
+      ],
+    );
+    AppLog.log('ptr', 'DOWN -> stroke-start id=${event.pointer} at=${_fmt(pagePos)}');
+    setState(() {});
+  }
+
+  void _onViewportPointerMove(PointerMoveEvent event) {
+    if (event.kind == PointerDeviceKind.trackpad) return;
+    if (_pointers.containsKey(event.pointer)) {
+      _pointers[event.pointer] = event.position;
+    }
+    if (_pointers.length >= 2) {
+      _applyTwoFingerGesture();
+      return;
+    }
+    // 移动模式：单指 / 鼠标拖动平移画布
+    if (_panPointer == event.pointer && _lastPanPosition != null) {
+      final delta = event.position - _lastPanPosition!;
+      _panBy(delta);
+      _lastPanPosition = event.position;
+      return;
+    }
+    final current = _current;
+    if (current == null) {
+      if (_isEraser && _pointers.isNotEmpty) {
+        final pagePos = _viewportToPage(event.localPosition);
+        if (_pageContains(pagePos)) {
+          // 橡皮拖动持续擦；整段拖动合并为一次撤销
+          _session.eraseAt(_session.currentPage, pagePos, _eraserRadius, mergeWithLast: _erasing);
+        }
+      }
+      return;
+    }
+    final pagePos = _viewportToPage(event.localPosition);
+    final elapsed = DateTime.now().difference(_strokeStart ?? DateTime.now()).inMilliseconds;
+    current.points.add(InkPoint(
+      x: pagePos.dx,
+      y: pagePos.dy,
+      pressure: event.pressure > 0 ? event.pressure.clamp(0.0, 1.0) : 1,
+      t: elapsed,
+    ));
+    if (current.points.length % 20 == 0) {
+      AppLog.log('ptr', 'MOVE stroke id=${event.pointer} pts=${current.points.length} last=${_fmt(pagePos)}');
+    }
+    setState(() {});
+  }
+
+  void _onViewportPointerUp(PointerEvent event) {
+    AppLog.log('ptr',
+        'UP kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)}');
+    if (event.kind == PointerDeviceKind.trackpad) {
+      AppLog.log('ptr', 'UP -> ignored (trackpad)');
+      return;
+    }
+    _pointers.remove(event.pointer);
+    if (_panPointer == event.pointer) {
+      _panPointer = null;
+      _lastPanPosition = null;
+    }
+    _erasing = false;
+    final stroke = _current;
+    _current = null;
+    _strokeStart = null;
+    if (stroke != null && stroke.points.isNotEmpty) {
+      AppLog.log('ptr', 'UP -> stroke commit id=${event.pointer} pts=${stroke.points.length} '
+          'first=${_fmt(Offset(stroke.points.first.x, stroke.points.first.y))} '
+          'last=${_fmt(Offset(stroke.points.last.x, stroke.points.last.y))}');
+      _session.addStroke(_session.currentPage, stroke);
+    } else if (stroke != null) {
+      AppLog.log('ptr', 'UP -> stroke empty (dropped) id=${event.pointer}');
+    }
+    setState(() {});
+  }
+
+  /// 双指（触摸屏）捏合 / 平移：保持两指中点跟随、间距决定缩放比。
+  void _applyTwoFingerGesture() {
+    final points = _pointers.values.toList();
+    if (points.length < 2 || _gestureMid == null || _gestureSpan == null) return;
+    final mid = Offset((points[0].dx + points[1].dx) / 2, (points[0].dy + points[1].dy) / 2);
+    final span = (points[0] - points[1]).distance;
+    if (_gestureSpan! <= 0 || span <= 0) return;
+    final ratio = (span / _gestureSpan!).clamp(0.5, 2.0);
+    _zoomAboutGlobal(_gestureMid!, ratio);
+    // 中点移动的平移量（走 _panBy，带边界钳制）
+    _panBy(mid - _gestureMid!);
+    _gestureMid = mid;
+    _gestureSpan = span;
   }
 
   void _onRootPointerSignal(PointerSignalEvent event) {
@@ -494,34 +687,40 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: AnimatedBuilder(
-                    animation: _transform,
-                    builder: (context, _) {
-                      return Transform(
-                        transform: _transform.value,
-                        // 页面按原始尺寸放在视口左上（OverflowBox 放开约束），
-                        // 所有矩阵运算都在视口坐标系里进行
-                        child: OverflowBox(
-                          alignment: Alignment.topLeft,
-                          maxWidth: double.infinity,
-                          maxHeight: double.infinity,
-                          child: SizedBox(
-                            key: _pageKey,
-                            width: notebook.pageWidth,
-                            height: notebook.pageHeight,
-                            child: _NotebookPageView(
-                              session: _session,
-                              pageIndex: _session.currentPage,
-                              tool: _tool,
-                              color: _color,
-                              widthScale: _widthScale,
-                              onZoom: _zoomAboutGlobal,
-                              onPan: _panBy,
+                  // 捕获层在**视口级**：命中不受页面尺寸限制（页面下半部
+                  // 的点击曾被 OverflowBox 的尺寸检查判未命中 → 画不了线），
+                  // 坐标经矩阵逆变换换算为页面坐标（见 _onViewportPointerDown）
+                  child: Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerDown: _onViewportPointerDown,
+                    onPointerMove: _onViewportPointerMove,
+                    onPointerUp: _onViewportPointerUp,
+                    onPointerCancel: _onViewportPointerUp,
+                    child: AnimatedBuilder(
+                      animation: _transform,
+                      builder: (context, _) {
+                        return Transform(
+                          transform: _transform.value,
+                          // 页面按原始尺寸放在视口左上（OverflowBox 放开约束），
+                          // 所有矩阵运算都在视口坐标系里进行
+                          child: OverflowBox(
+                            alignment: Alignment.topLeft,
+                            maxWidth: double.infinity,
+                            maxHeight: double.infinity,
+                            child: SizedBox(
+                              key: _pageKey,
+                              width: notebook.pageWidth,
+                              height: notebook.pageHeight,
+                              child: _NotebookPageView(
+                                session: _session,
+                                pageIndex: _session.currentPage,
+                                current: _current,
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
                 // 页码指示（纯指示器：IgnorePointer，否则会挡住中下部的落笔）
@@ -580,257 +779,52 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
 }
 
 /// 单页视图：纸张 + 已落定笔迹 + 捕获层。
-class _NotebookPageView extends StatefulWidget {
+/// 单页视图：纸张 + 已落定笔迹 + 进行中的草稿（纯绘制，无指针处理）。
+///
+/// 指针捕获在编辑器窗口层（见 _NotebookEditorPageState 的
+/// _onViewportPointerDown 系列）：**这是刻意的** —— 画布结构是
+/// Transform → OverflowBox(视口尺寸) → SizedBox(页面尺寸)，
+/// 命中测试会先检查 OverflowBox 自身尺寸是否包含逆变换后的页面坐标，
+/// 页面下半部（y > 视口高）会被判未命中 → 永远画不了线（v0.10.0 实测）。
+/// 因此捕获层放在视口层，坐标用矩阵逆变换换算。
+class _NotebookPageView extends StatelessWidget {
   const _NotebookPageView({
     required this.session,
     required this.pageIndex,
-    required this.tool,
-    required this.color,
-    required this.widthScale,
-    required this.onZoom,
-    required this.onPan,
+    required this.current,
   });
 
   final NotebookSession session;
   final int pageIndex;
-  final NotebookTool tool;
-  final Color color;
-  final double widthScale;
-  final void Function(Offset center, double ratio) onZoom;
 
-  /// 滚轮 / 触控板滚动 → 视口内平移。
-  final void Function(Offset delta) onPan;
-
-  @override
-  State<_NotebookPageView> createState() => _NotebookPageViewState();
-}
-
-class _NotebookPageViewState extends State<_NotebookPageView> {
-  /// 进行中的一笔（笔记页坐标）。
-  InkStroke? _current;
-  DateTime? _strokeStart;
-
-  /// 活动指针（viewport 坐标）—— 2 个及以上时进入平移/缩放。
-  final Map<int, Offset> _pointers = {};
-  Offset? _gestureMid;
-  double? _gestureSpan;
-
-  /// 是否处于一段连续的擦除拖动中（合并撤销记录）。
-  bool _erasing = false;
-
-  /// 移动模式：正在拖画布的指针。
-  int? _panPointer;
-  Offset? _lastPanPosition;
-
-  bool get _isEraser => widget.tool == NotebookTool.eraser;
-
-  bool get _isPanTool => widget.tool == NotebookTool.pan;
-
-  /// 工具的页面单位线宽（存储值，与缩放无关）。
-  double get _strokeWidth {
-    final base = switch (widget.tool) {
-      NotebookTool.pen => 2.0,
-      NotebookTool.marker => 5.0,
-      NotebookTool.highlighter => 16.0,
-      NotebookTool.eraser => 2.0,
-      NotebookTool.pan => 0.0, // 不画线，不会走到
-    };
-    return base * widget.widthScale;
-  }
-
-  Color get _strokeColor {
-    final opacity = widget.tool == NotebookTool.highlighter ? 0.35 : 1.0;
-    return widget.color.withValues(alpha: opacity);
-  }
-
-  void _onPointerDown(PointerDownEvent event) {
-    AppLog.log('ptr',
-        'DOWN kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} pressure=${event.pressure.toStringAsFixed(2)} buttons=${event.buttons}');
-    // 触控板「直接触摸」指针不参与任何交互（画线 / 双指逻辑都不进）：
-    // macOS 双指滑动时而被路由成裸指针，参与画线就会误画。
-    // 触控板只通过 PointerPanZoom / PointerScroll 事件平移缩放。
-    if (event.kind == PointerDeviceKind.trackpad) {
-      AppLog.log('ptr', 'DOWN -> ignored (trackpad)');
-      return;
-    }
-    _pointers[event.pointer] = event.position;
-    // 第二根手指落下：取消正在画的笔（两指 = 平移/缩放手势）
-    if (_pointers.length == 2 && _current != null) {
-      _current = null;
-      _strokeStart = null;
-    }
-    if (_pointers.length == 2) {
-      final points = _pointers.values.toList();
-      _gestureMid = Offset(
-        (points[0].dx + points[1].dx) / 2,
-        (points[0].dy + points[1].dy) / 2,
-      );
-      _gestureSpan = (points[0] - points[1]).distance;
-      return;
-    }
-    if (_pointers.length > 2 || _current != null) return;
-
-    // **没有按下任何按键**的 mouse down（macOS 会把双指滑动合成这种
-    // 「拖动」，光标甚至移出窗口）—— 不是真实点击，一律忽略。
-    // 真实点击 buttons ≥ 1；iPad 触摸 buttons = 1（引擎设置）。
-    if (event.kind == PointerDeviceKind.mouse && event.buttons == 0) {
-      AppLog.log('ptr', 'DOWN -> ignored (mouse buttons=0, synthesized drag)');
-      return;
-    }
-
-    // 移动模式：拖动 = 平移画布，不能画线
-    if (_isPanTool) {
-      _panPointer = event.pointer;
-      _lastPanPosition = event.position;
-      AppLog.log('ptr', 'DOWN -> pan-drag start id=${event.pointer} at=${_fmt(event.position)}');
-      return;
-    }
-
-    if (_isEraser) {
-      _erasing = true;
-      AppLog.log('ptr', 'DOWN -> erase-drag start id=${event.pointer}');
-      widget.session.eraseAt(widget.pageIndex, event.localPosition, _eraserRadius);
-      return;
-    }
-    _strokeStart = DateTime.now();
-    _current = InkStroke(
-      color: _strokeColor,
-      width: _strokeWidth,
-      cap: widget.tool == NotebookTool.highlighter ? StrokeCap.square : StrokeCap.round,
-      points: [
-        InkPoint(x: event.localPosition.dx, y: event.localPosition.dy, t: 0),
-      ],
-    );
-    AppLog.log('ptr', 'DOWN -> stroke-start id=${event.pointer} at=${_fmt(event.localPosition)}');
-    setState(() {});
-  }
-
-  void _onPointerMove(PointerMoveEvent event) {
-    if (event.kind == PointerDeviceKind.trackpad) {
-      AppLog.log('ptr', 'MOVE kind=trackpad id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} -> ignored');
-      return;
-    }
-    if (_pointers.containsKey(event.pointer)) {
-      _pointers[event.pointer] = event.position;
-    }
-    if (_pointers.length >= 2) {
-      AppLog.log('ptr', 'MOVE id=${event.pointer} pointers=${_pointers.length} -> two-finger gesture');
-      _applyTwoFingerGesture();
-      return;
-    }
-    // 移动模式：单指 / 鼠标拖动平移画布
-    if (_panPointer == event.pointer && _lastPanPosition != null) {
-      final delta = event.position - _lastPanPosition!;
-      AppLog.log('ptr', 'MOVE id=${event.pointer} -> pan-drag delta=${_fmt(delta)}');
-      widget.onPan(delta);
-      _lastPanPosition = event.position;
-      return;
-    }
-    final current = _current;
-    if (current == null) {
-      // 无按键 mouse 的 move（合成拖动）：只平移（移动模式已处理），不画
-      if (_isPanTool && _panPointer == null && event.kind == PointerDeviceKind.mouse && event.buttons == 0) {
-        widget.onPan(event.delta);
-      }
-      if (_isEraser && _pointers.isNotEmpty) {
-        // 橡皮拖动持续擦；整段拖动合并为一次撤销
-        widget.session.eraseAt(widget.pageIndex, event.localPosition, _eraserRadius, mergeWithLast: _erasing);
-      } else {
-        AppLog.log('ptr', 'MOVE id=${event.pointer} no-current (dropped) local=${_fmt(event.localPosition)}');
-      }
-      return;
-    }
-    final elapsed = DateTime.now().difference(_strokeStart ?? DateTime.now()).inMilliseconds;
-    current.points.add(InkPoint(
-      x: event.localPosition.dx,
-      y: event.localPosition.dy,
-      pressure: event.pressure > 0 ? event.pressure.clamp(0.0, 1.0) : 1,
-      t: elapsed,
-    ));
-    if (current.points.length % 20 == 0) {
-      AppLog.log('ptr', 'MOVE stroke id=${event.pointer} pts=${current.points.length} last=${_fmt(event.localPosition)}');
-    }
-    setState(() {});
-  }
-
-  void _onPointerUp(PointerEvent event) {
-    AppLog.log('ptr', 'UP kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)}');
-    // trackpad 指针从未参与：提前忽略，避免误提交正在画的笔迹
-    if (event.kind == PointerDeviceKind.trackpad) {
-      AppLog.log('ptr', 'UP -> ignored (trackpad)');
-      return;
-    }
-    _pointers.remove(event.pointer);
-    if (_panPointer == event.pointer) {
-      _panPointer = null;
-      _lastPanPosition = null;
-    }
-    _erasing = false;
-    if (_pointers.isEmpty) {
-      _gestureMid = null;
-      _gestureSpan = null;
-    }
-    final stroke = _current;
-    _current = null;
-    _strokeStart = null;
-    if (stroke != null && stroke.points.isNotEmpty) {
-      AppLog.log('ptr', 'UP -> stroke commit id=${event.pointer} pts=${stroke.points.length} '
-          'first=${_fmt(Offset(stroke.points.first.x, stroke.points.first.y))} '
-          'last=${_fmt(Offset(stroke.points.last.x, stroke.points.last.y))}');
-      widget.session.addStroke(widget.pageIndex, stroke);
-    } else if (stroke != null) {
-      AppLog.log('ptr', 'UP -> stroke empty (dropped) id=${event.pointer}');
-    }
-    setState(() {});
-  }
-
-  /// 双指平移 + 缩放：保持两指中点跟随、两指间距决定缩放比。
-  void _applyTwoFingerGesture() {
-    final points = _pointers.values.toList();
-    if (points.length < 2 || _gestureMid == null || _gestureSpan == null) return;
-    final mid = Offset((points[0].dx + points[1].dx) / 2, (points[0].dy + points[1].dy) / 2);
-    final span = (points[0] - points[1]).distance;
-    if (_gestureSpan! <= 0 || span <= 0) return;
-    final ratio = (span / _gestureSpan!).clamp(0.5, 2.0);
-    widget.onZoom(_gestureMid!, ratio);
-    // 中点移动的平移量（走 onPan，带边界钳制）
-    widget.onPan(mid - _gestureMid!);
-    _gestureMid = mid;
-    _gestureSpan = span;
-  }
+  /// 进行中的草稿笔迹（编辑器状态持有，逐帧传入重绘）。
+  final InkStroke? current;
 
   @override
   Widget build(BuildContext context) {
-    final page = widget.session.notebook.pages[widget.pageIndex];
-    final strokes = widget.session.strokesOf(widget.pageIndex);
-    return Listener(
-      behavior: HitTestBehavior.opaque,
-      onPointerDown: _onPointerDown,
-      onPointerMove: _onPointerMove,
-      onPointerUp: _onPointerUp,
-      onPointerCancel: _onPointerUp,
+    final page = session.notebook.pages[pageIndex];
+    final strokes = session.strokesOf(pageIndex);
+    return CustomPaint(
+      painter: _NotebookPaperPainter(template: page.template, pageSize: _pageSize),
+      isComplex: true,
+      willChange: true,
       child: CustomPaint(
-        painter: _NotebookPaperPainter(template: page.template, pageSize: _pageSize),
-        isComplex: true,
-        willChange: false,
-        child: CustomPaint(
-          painter: _PageStrokesPainter(
-            strokes: strokes,
-            current: _current,
-          ),
-          child: const SizedBox.expand(),
+        painter: _PageStrokesPainter(
+          strokes: strokes,
+          current: current,
         ),
+        child: const SizedBox.expand(),
       ),
     );
   }
 
   Size get _pageSize => Size(
-        widget.session.notebook.pageWidth,
-        widget.session.notebook.pageHeight,
+        session.notebook.pageWidth,
+        session.notebook.pageHeight,
       );
 }
 
-/// 已落定笔迹 + 进行中笔迹的绘制器（全部是笔记页坐标）。
+
 class _PageStrokesPainter extends CustomPainter {
   const _PageStrokesPainter({required this.strokes, this.current});
 
