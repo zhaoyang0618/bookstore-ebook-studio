@@ -118,15 +118,21 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   Timer? _autosave;
   bool _saved = true;
 
+  /// 仅供测试：当前变换矩阵（初始铺满是否生效的校验点）。
+  @visibleForTesting
+  Matrix4 get debugTransform => _transform.value;
+
   @override
   void initState() {
     super.initState();
     _session = NotebookSession(widget.notebook);
     _session.addListener(_onSessionChanged);
+    AppLog.log('editor', 'initState notebook=${_session.notebook.id} pages=${_session.pageCount}');
   }
 
   @override
   void dispose() {
+    AppLog.log('editor', 'dispose notebook=${_session.notebook.id}');
     _autosave?.cancel();
     _saveNow();
     _session.removeListener(_onSessionChanged);
@@ -209,7 +215,9 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   /// 没铺到的那根轴上让纸居中。
   Matrix4 _coverMatrix() {
     final scale = _coverScale;
-    final m = Matrix4.identity()..scaleByDouble(scale, scale, 1, 1);
+    // z 轴同缩放：getMaxScaleOnAxis 会计入 z 轴，sz=1 会让所有读缩放的
+    // 逻辑（边界钳制 / 缩放下限）误以为 scale=1 —— v0.9.6 的实测 bug
+    final m = Matrix4.identity()..scaleByDouble(scale, scale, scale, 1);
     final dx = max(
         0.0, (_viewportSize.width - _session.notebook.pageWidth * scale) / 2);
     final dy = max(
@@ -315,7 +323,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     if (effective == 1) return;
     final ops = Matrix4.identity()
       ..translateByDouble(center.dx, center.dy, 0, 1)
-      ..scaleByDouble(effective, effective, 1, 1)
+      ..scaleByDouble(effective, effective, effective, 1)
       ..translateByDouble(-center.dx, -center.dy, 0, 1);
     ops.multiply(_transform.value);
     _transform.value = ops;
@@ -405,8 +413,13 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
           // 纵向超出部分用双指 / 滚轮平移；不再缩成一角让人找不到纸在哪
           if (_needsInitialFit) {
             _needsInitialFit = false;
+            AppLog.log('fit', 'builder: schedule initial fit, viewport=$_viewportSize cover=${_coverScale.toStringAsFixed(3)}');
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _transform.value = _coverMatrix();
+              AppLog.log('fit', 'postFrame: entered, viewport=$_viewportSize mounted=$mounted');
+              if (mounted) {
+                _transform.value = _coverMatrix();
+                AppLog.log('fit', 'postFrame: applied scale=${_transform.value.getMaxScaleOnAxis().toStringAsFixed(3)}');
+              }
             });
           } else if (_lastViewportSize != _viewportSize) {
             // 窗口缩放后页面可能跑到视野外，钳一次
@@ -451,15 +464,17 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
                     },
                   ),
                 ),
-                // 页码指示
+                // 页码指示（纯指示器：IgnorePointer，否则会挡住中下部的落笔）
                 Positioned(
                   bottom: 96,
                   left: 0,
                   right: 0,
-                  child: Center(
-                    child: _PageBadge(
-                      current: _session.currentPage + 1,
-                      total: _session.pageCount,
+                  child: IgnorePointer(
+                    child: Center(
+                      child: _PageBadge(
+                        current: _session.currentPage + 1,
+                        total: _session.pageCount,
+                      ),
                     ),
                   ),
                 ),
@@ -575,7 +590,7 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
 
   void _onPointerDown(PointerDownEvent event) {
     AppLog.log('ptr',
-        'DOWN kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} pressure=${event.pressure.toStringAsFixed(2)}');
+        'DOWN kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} pressure=${event.pressure.toStringAsFixed(2)} buttons=${event.buttons}');
     // 触控板「直接触摸」指针不参与任何交互（画线 / 双指逻辑都不进）：
     // macOS 双指滑动时而被路由成裸指针，参与画线就会误画。
     // 触控板只通过 PointerPanZoom / PointerScroll 事件平移缩放。
@@ -599,6 +614,14 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       return;
     }
     if (_pointers.length > 2 || _current != null) return;
+
+    // **没有按下任何按键**的 mouse down（macOS 会把双指滑动合成这种
+    // 「拖动」，光标甚至移出窗口）—— 不是真实点击，一律忽略。
+    // 真实点击 buttons ≥ 1；iPad 触摸 buttons = 1（引擎设置）。
+    if (event.kind == PointerDeviceKind.mouse && event.buttons == 0) {
+      AppLog.log('ptr', 'DOWN -> ignored (mouse buttons=0, synthesized drag)');
+      return;
+    }
 
     // 移动模式：拖动 = 平移画布，不能画线
     if (_isPanTool) {
@@ -650,6 +673,10 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     }
     final current = _current;
     if (current == null) {
+      // 无按键 mouse 的 move（合成拖动）：只平移（移动模式已处理），不画
+      if (_isPanTool && _panPointer == null && event.kind == PointerDeviceKind.mouse && event.buttons == 0) {
+        widget.onPan(event.delta);
+      }
       if (_isEraser && _pointers.isNotEmpty) {
         // 橡皮拖动持续擦；整段拖动合并为一次撤销
         widget.session.eraseAt(widget.pageIndex, event.localPosition, _eraserRadius, mergeWithLast: _erasing);
