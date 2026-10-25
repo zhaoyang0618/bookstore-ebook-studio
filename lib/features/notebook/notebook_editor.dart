@@ -410,6 +410,10 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
       onPointerPanZoomUpdate: _onPanZoomUpdate,
       onPointerPanZoomEnd: _onPanZoomEnd,
       onPointerSignal: _onRootPointerSignal,
+      onPointerDown: (event) => AppLog.log('root-ptr',
+          'DOWN kind=${_kindName(event.kind)} buttons=${event.buttons} global=${_fmt(event.position)} pressure=${event.pressure.toStringAsFixed(2)}'),
+      onPointerUp: (event) => AppLog.log('root-ptr',
+          'UP kind=${_kindName(event.kind)} global=${_fmt(event.position)}'),
       child: Scaffold(
         appBar: AppBar(
           leading: BackButton(onPressed: () => Navigator.pop(context)),
