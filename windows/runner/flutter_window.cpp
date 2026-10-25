@@ -25,6 +25,9 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  // 录课桥接（设计文档 3.5）：channel 要在引擎销毁前释放，OnDestroy 里对应 reset
+  recorder_bridge_ = std::make_unique<RecorderBridge>(GetHandle(),
+                                                      flutter_controller_->engine()->messenger());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +43,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  recorder_bridge_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

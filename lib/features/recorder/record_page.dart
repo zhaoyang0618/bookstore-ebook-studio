@@ -1,13 +1,17 @@
 /// 录课（设计文档 3.5）。
 ///
 /// 原生实现（channel `ebook_studio/recorder`）：
-/// - macOS：`AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（见
+/// - macOS：`AVCaptureScreenInput` 录整个屏幕（见
 ///   `macos/Runner/ScreenRecorderBridge.swift`）
-/// - iOS：ReplayKit `startCapture` 采样缓冲 + `AVAssetWriter` 直接落盘
-///   （见 `ios/Runner/ReplayKitBridge.swift`）
-/// - Android：MediaProjection + MediaRecorder + 前台服务
+/// - iOS：**仅录本应用窗口** —— `drawHierarchy` 逐帧渲染自己的视图树 +
+///   `AVAssetWriter`，不需要屏幕录制权限（见 `ios/Runner/ReplayKitBridge.swift`）
+/// - Android：MediaProjection + MediaRecorder；Android 15+ 用
+///   `MIRROR_MODE_APP_ONLY` 只镜像本应用窗口，低版本录整个屏幕
 ///   （见 `MediaProjectionBridge.kt`）
-/// - Windows / Linux：暂未实现，Dart 侧直接给出明确提示
+/// - Windows：**仅录本应用窗口** —— `PrintWindow` 逐帧抓取 +
+///   Media Foundation 编码 H.264（见 `windows/runner/recorder_bridge.cpp`；
+///   v1 暂不含音频）
+/// - Linux：暂未实现，Dart 侧直接给出明确提示
 ///
 /// 停止后由 [RecordingRepository] 把视频挪到最终位置并写同名 JSON
 /// 元数据（设计文档 1.7），列表支持回放与删除。
@@ -130,10 +134,20 @@ class _RecordPageState extends ConsumerState<RecordPage> {
   /// 平台是否支持录课桥接。不支持时给出明确原因（而不是让用户
   /// 点了才开始才失败）。
   String? _unsupportedReason() {
-    if (Platform.isWindows) return 'Windows 端录制尚未实现（规划：Windows.Graphics.Capture）';
     if (Platform.isLinux) return 'Linux 端录制尚未实现（规划：PipeWire）';
     return null;
   }
+
+  /// 录制范围说明（各端能力不同，见文件头注释）。
+  String get _captureScopeText {
+    if (Platform.isIOS || Platform.isWindows) return '仅录制本应用窗口的内容';
+    if (Platform.isMacOS) return '录制整个屏幕（阅读器 + 手写标注都会被录进去）';
+    if (Platform.isAndroid) return 'Android 15+ 仅录本应用窗口，更低版本录整个屏幕';
+    return '';
+  }
+
+  /// Windows 端 v1 只实现视频轨。
+  bool get _audioSupported => !Platform.isWindows;
 
   Future<void> _start() async {
     final unsupported = _unsupportedReason();
@@ -248,7 +262,12 @@ class _RecordPageState extends ConsumerState<RecordPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _RecordingStatus(state: state, seconds: seconds, withAudio: _withAudio),
+            _RecordingStatus(
+              state: state,
+              seconds: seconds,
+              withAudio: _withAudio,
+              scopeText: _captureScopeText,
+            ),
             const SizedBox(height: 16),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -271,7 +290,8 @@ class _RecordPageState extends ConsumerState<RecordPage> {
                   FilterChip(
                     label: Text(_withAudio ? '含麦克风音频' : '无音频'),
                     selected: _withAudio,
-                    onSelected: (value) => setState(() => _withAudio = value),
+                    onSelected: _audioSupported ? (value) => setState(() => _withAudio = value) : null,
+                    tooltip: _audioSupported ? null : 'Windows 端暂不支持录制音频',
                   ),
               ],
             ),
@@ -318,11 +338,17 @@ class _RecordPageState extends ConsumerState<RecordPage> {
 
 /// 录制状态卡。
 class _RecordingStatus extends StatelessWidget {
-  const _RecordingStatus({required this.state, required this.seconds, required this.withAudio});
+  const _RecordingStatus({
+    required this.state,
+    required this.seconds,
+    required this.withAudio,
+    required this.scopeText,
+  });
 
   final RecorderState state;
   final int seconds;
   final bool withAudio;
+  final String scopeText;
 
   @override
   Widget build(BuildContext context) {
@@ -350,7 +376,8 @@ class _RecordingStatus extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '录制内容为整个屏幕（阅读器 + 手写标注都会被录进去）',
+              scopeText,
+              textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],

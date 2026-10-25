@@ -119,7 +119,17 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     /** 先起前台服务（Android 14 要求在 getMediaProjection 之前），再弹系统授权框。 */
     private fun launchConsent() {
         RecordingForegroundService.start(activity)
-        activity.startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CODE_PROJECTION)
+        val intent = if (Build.VERSION.SDK_INT >= 35) {
+            // Android 15+：只镜像本应用窗口（不录其它应用 / 桌面）
+            val displayConfig = android.media.projection.DisplayConfig.Builder()
+                .setDisplayMirrorMode(android.media.projection.DisplayMirrorMode.MIRROR_MODE_APP_ONLY)
+                .build()
+            val config = android.media.projection.MediaProjectionConfig.createFromDisplayConfig(displayConfig)
+            projectionManager.createScreenCaptureIntent(config)
+        } else {
+            projectionManager.createScreenCaptureIntent()
+        }
+        activity.startActivityForResult(intent, REQUEST_CODE_PROJECTION)
     }
 
     private fun startProjection(resultCode: Int, data: Intent) {
@@ -171,6 +181,14 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
 
     private fun screenSize(): ScreenSize {
         val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        if (Build.VERSION.SDK_INT >= 35) {
+            // 仅镜像本应用窗口 → 虚拟屏尺寸应取**当前窗口**（而非整块屏幕）
+            val bounds = wm.currentWindowMetrics.bounds
+            val dm = activity.resources.displayMetrics
+            val w = bounds.width() - (bounds.width() % 2)
+            val h = bounds.height() - (bounds.height() % 2)
+            return ScreenSize(w, h, dm.densityDpi)
+        }
         if (Build.VERSION.SDK_INT >= 30) {
             val bounds: WindowMetrics = wm.maximumWindowMetrics
             val dm = activity.resources.displayMetrics

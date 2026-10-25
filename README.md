@@ -142,18 +142,26 @@ pypdf    → 第 1 页 34 条注释，其中 Ink 2 条
 
 ## 录课（设计文档 3.5，已完整实现）
 
-录的是**整个屏幕**（阅读器 + 手写标注都会被录进去），各端用系统原生管线，无第三方依赖：
+四个平台各自用「最合适自己」的原生管线，**优先只录本应用窗口**（不录别的
+应用和桌面，也省掉不必要的权限）：
 
-| 平台 | 实现 | 输出 | 权限 |
+| 平台 | 范围 | 实现 | 权限 |
 |---|---|---|---|
-| macOS | `AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（`ScreenRecorderBridge.swift`） | H.264+AAC MP4 | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC「麦克风」 |
-| iOS | ReplayKit `startCapture` 采样缓冲 + `AVAssetWriter`（`ReplayKitBridge.swift`） | H.264+AAC MP4 | 系统录屏弹窗 + 麦克风 |
-| Android | MediaProjection + MediaRecorder + `mediaProjection` 前台服务（`MediaProjectionBridge.kt`） | H.264+AAC MP4 | 系统投屏授权 + 麦克风（运行时请求） |
-| Windows / Linux | 未实现，界面直接给出明确提示 | — | — |
+| iOS | 仅本应用窗口 | `drawHierarchy` 逐帧渲染自己的视图树 → `AVAssetWriter`（H.264）；麦克风 `AVAudioRecorder` 单独录 m4a，停止后 `AVMutableComposition` passthrough 合成（`ReplayKitBridge.swift`） | 只需麦克风（**不需要**屏幕录制权限） |
+| Android 15+ | 仅本应用窗口 | MediaProjection `MIRROR_MODE_APP_ONLY` + MediaRecorder（`MediaProjectionBridge.kt`） | 系统投屏授权 + 麦克风 |
+| Android 14- | 整个屏幕 | MediaProjection + MediaRecorder + `mediaProjection` 前台服务 | 同上 |
+| Windows | 仅本应用窗口 | `PrintWindow(PW_RENDERFULLCONTENT)` 逐帧抓取（Flutter 是 ANGLE/D3D 渲染，必须带此 flag）+ Media Foundation SinkWriter 编码 H.264（`windows/runner/recorder_bridge.cpp`，纯 Win32/COM，不引 C++/WinRT）；v1 暂不含音频 | 无需额外权限 |
+| macOS | 整个屏幕 | `AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（`ScreenRecorderBridge.swift`） | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC「麦克风」 |
+| Linux | 未实现 | 界面直接给出明确提示（规划：PipeWire） | — |
 
-**为什么 iOS 用采样缓冲而不是 `stopRecording` 的预览界面**：预览界面只能
-「存到相册」，拿不到文件路径，元数据（1.7）无从写起。采样缓冲由我们控制
-输出路径，停止后立即得到可用 MP4。
+**为什么 iOS 不用 ReplayKit**：ReplayKit 只有「录整个屏幕」一种（采样缓冲
+模式也一样），系统没有「只录自己窗口」的 API，而且要屏幕录制权限。
+`drawHierarchy` 渲染窗口层级就能拿到本应用内容 —— 代价是系统弹窗、键盘等
+不在窗口层级内的东西录不进去（对录课场景恰好是优点），且切后台时画面定格。
+
+**为什么 macOS 还是全屏**：窗口级要换 ScreenCaptureKit
+（`SCContentFilter(desktopIndependentWindow:)`，macOS 12.3+），且麦克风要
+走独立采样管线（SCK 只给系统音频）——收益不大、风险不小，待后续版本。
 
 **Android 14+ 的坑**：`getMediaProjection()` 前必须已有 `mediaProjection`
 类型的前台服务在运行，且授权结果必须在用户同意的会话内用掉。因此流程是

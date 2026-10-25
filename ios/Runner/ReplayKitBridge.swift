@@ -1,35 +1,49 @@
 //
-//  ReplayKit 桥接（设计文档 3.5：iPad 端屏幕录制）。
+//  iOS 录制桥接（设计文档 3.5：iPad 端录课）—— **仅录制本应用窗口**。
 //
-//  通过 Flutter Platform Channel 暴露 startRecording / stopRecording，
-//  内部用 RPScreenRecorder 的**采样缓冲模式**（startCapture），
-//  把视频 / 麦克风 CMSampleBuffer 写进 AVAssetWriter，直接产出 MP4。
+//  为什么不用 ReplayKit：
+//  - ReplayKit（startCapture / 预览保存）只能录**整个屏幕**，
+//    系统没有「只录自己窗口」的 API；
+//  - 需要屏幕录制权限，且录进来的内容（其它 app、状态栏）不是用户想要的。
 //
-//  为什么不用 stopRecording 的 RPPreviewViewController：
-//  预览界面只让用户「存到相册」，我们拿不到文件路径，元数据
-//  （设计文档 1.7）也就无从写起。采样缓冲模式由我们控制输出路径，
-//  停止后立即得到可用的 MP4。
+//  这里的做法：CADisplayLink 定时（默认 30fps）用 `drawHierarchy` 把本应用
+//  的窗口渲染进 CVPixelBuffer，AVAssetWriter 编码 H.264 —— 录制的是
+//  **应用自己的内容**，且不需要屏幕录制权限（只要麦克风权限）。
+//
+//  麦克风：AVAudioRecorder 单独录一路 m4a，停止后用 AVMutableComposition
+//  （passthrough 导出）与视频合成。这比手动构造 CMSampleBuffer 的音频
+//  管线简单一个数量级，且导出失败时还能退回纯视频。
+//
+//  限制：切后台 / 息屏时 CADisplayLink 暂停，画面定格（时间轴继续）；
+//  系统弹窗、键盘等不在窗口层级内的内容不会被录进去。
 //
 //  Dart 侧见 lib/features/recorder/record_page.dart（channel: ebook_studio/recorder）。
 //
 
 import AVFoundation
 import Flutter
-import ReplayKit
+import UIKit
 
 public class ReplayKitBridge: NSObject, FlutterPlugin {
-    private let recorder = RPScreenRecorder.shared()
-    private let queue = DispatchQueue(label: "ebook_studio.recorder")
-
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
-    private var outputURL: URL?
-    private var startedSession = false
-    private var startedAt: Date?
+    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var pixelPool: CVPixelBufferPool?
+    private var displayLink: CADisplayLink?
 
-    // FlutterResult 不能跨线程调用，停止完成后的回调先存这里，回主线程再取
-    private var pendingStopResult: FlutterResult?
+    private weak var targetWindow: UIWindow?
+    private var pixelWidth = 0
+    private var pixelHeight = 0
+
+    private var outputURL: URL?
+    private var micURL: URL?
+    private var micRecorder: AVAudioRecorder?
+    private var sessionStartTime: CMTime?
+    private var startedAt: Date?
+    private var fps = 30
+
+    // FlutterResult 只能在主线程调用；导出完成后的回调先存这里
+    private var pendingStop: FlutterResult?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "ebook_studio/recorder", binaryMessenger: registrar.messenger())
@@ -51,24 +65,38 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
     // ---------- 开始 ----------
 
     private func startRecording(args: [String: Any]?, result: @escaping FlutterResult) {
-        guard recorder.isAvailable else {
-            result(FlutterError(code: "UNAVAILABLE", message: "屏幕录制不可用（可能是受限模式或模拟器）", details: nil))
-            return
-        }
         guard writer == nil else {
             result(FlutterError(code: "ALREADY_RECORDING", message: "已经在录制中", details: nil))
             return
         }
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first(where: { $0.isKeyWindow }) else {
+            result(FlutterError(code: "UNAVAILABLE", message: "找不到应用窗口", details: nil))
+            return
+        }
+
+        let scale = window.screen.scale
+        var width = Int((window.bounds.width * scale).rounded(.down))
+        var height = Int((window.bounds.height * scale).rounded(.down))
+        width -= width % 2  // 编码器要求偶数
+        height -= height % 2
+        guard width >= 16, height >= 16 else {
+            result(FlutterError(code: "UNAVAILABLE", message: "窗口尺寸过小，无法录制", details: nil))
+            return
+        }
+        targetWindow = window
+        pixelWidth = width
+        pixelHeight = height
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        let fileName = "\(formatter.string(from: Date())).mp4"
-
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let recordingsDir = documents.appendingPathComponent("recordings", isDirectory: true)
-        try? FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
-        let url = recordingsDir.appendingPathComponent(fileName)
+        let dir = documents.appendingPathComponent("recordings", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(formatter.string(from: Date())).mp4")
         outputURL = url
 
         do {
@@ -78,130 +106,241 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
             return
         }
 
-        startedSession = false
-        startedAt = Date()
-        recorder.isMicrophoneEnabled = args?["audio"] as? Bool ?? false
+        // 视频轨 + 像素缓冲池（自己建池，避免 adaptor.pixelBufferPool 尚为 nil 的时序问题）
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+        ])
+        videoInput.expectsMediaDataInRealTime = true
+        guard writer!.canAdd(videoInput) else {
+            reset()
+            result(FlutterError(code: "START_FAILED", message: "无法添加视频轨道", details: nil))
+            return
+        }
+        writer!.add(videoInput)
+        self.videoInput = videoInput
 
-        recorder.startCapture(handler: { [weak self] sampleBuffer, sampleBufferType, error in
-            guard let self else { return }
-            if error != nil { return }
-            switch sampleBufferType {
-            case .video:
-                self.appendVideo(sampleBuffer)
-            case .audioApp, .audioMic:
-                // audioApp 是系统声音（iPad 上多为空），麦克风音频走 audioMic
-                self.appendAudio(sampleBuffer)
-            @unknown default:
-                break
-            }
-        }, completionHandler: { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.reset()
-                result(FlutterError(code: "START_FAILED", message: error.localizedDescription, details: nil))
-            } else {
-                result(nil)
-            }
-        })
+        let poolAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+        ]
+        adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput,
+                                                       sourcePixelBufferAttributes: poolAttributes)
+        CVPixelBufferPoolCreate(nil, poolAttributes as CFDictionary, nil, &pixelPool)
+
+        if writer!.startWriting() {
+            startedAt = Date()
+        } else {
+            reset()
+            result(FlutterError(code: "START_FAILED", message: "视频写入器启动失败", details: nil))
+            return
+        }
+
+        // 麦克风：单独录一路 m4a（失败则退化为纯视频，不阻塞录制）
+        if args?["audio"] as? Bool ?? false {
+            startMicRecording()
+        }
+
+        fps = max(1, min(60, args?["fps"] as? Int ?? 30))
+        let link = CADisplayLink(target: self, selector: #selector(captureFrame))
+        link.preferredFramesPerSecond = fps
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        result(nil)
     }
 
-    // ---------- 采样缓冲 → AVAssetWriter ----------
-
-    /// 首个视频缓冲到达时才创建输入：屏幕尺寸要从缓冲的格式描述里拿，
-    /// 提前猜会写错分辨率。
-    private func appendVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard let writer, writer.status == .writing else { return }
-        if videoInput == nil {
-            guard let description = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-            let dimensions = CMVideoFormatDescriptionGetDimensions(description)
-
-            let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: Int(dimensions.width),
-                AVVideoHeightKey: Int(dimensions.height),
-            ])
-            input.expectsMediaDataInRealTime = true
-            guard writer.canAdd(input) else { return }
-            writer.add(input)
-            videoInput = input
-
-            if audioInput == nil {
-                let audio = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                    AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVNumberOfChannelsKey: 2,
-                    AVSampleRateKey: 44100,
-                    AVEncoderBitRateKey: 128_000,
-                ])
-                audio.expectsMediaDataInRealTime = true
-                if writer.canAdd(audio) {
-                    writer.add(audio)
-                    audioInput = audio
-                }
+    private func startMicRecording() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try session.setActive(true)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mic-\(formatter.string(from: Date())).m4a")
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+            let recorder = try AVAudioRecorder(url: url, settings: settings)
+            guard recorder.record() else {
+                return
             }
-
-            if writer.startWriting() {
-                // sessionStartTime 在首个缓冲到来时确定，保证两条轨道时间轴一致
-                writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-                startedSession = true
-            }
-        }
-        guard startedSession, let videoInput else { return }
-        // 实时录制：编码器来不及就丢帧，不能阻塞回调队列
-        if videoInput.isReadyForMoreMediaData {
-            videoInput.append(sampleBuffer)
+            micRecorder = recorder
+            micURL = url
+        } catch {
+            // 麦克风不可用：纯视频继续
         }
     }
 
-    private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
-        guard let writer, writer.status == .writing, startedSession, let audioInput else { return }
-        if audioInput.isReadyForMoreMediaData {
-            audioInput.append(sampleBuffer)
+    // ---------- 逐帧渲染（主线程） ----------
+
+    @objc private func captureFrame() {
+        guard let writer, writer.status == .writing,
+              let videoInput, videoInput.isReadyForMoreMediaData,
+              let adaptor, let pool = pixelPool,
+              let window = targetWindow else {
+            return
         }
+
+        var pixelBuffer: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
+        guard let buffer = pixelBuffer else { return }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return }
+
+        // drawHierarchy 画在左上原点，CVPixelBuffer 是左下原点 → 翻转 y
+        context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        context.translateBy(x: 0, y: CGFloat(pixelHeight))
+        context.scaleBy(x: 1, y: -1)
+        // 窗口逻辑尺寸 → 像素尺寸
+        let scale = CGFloat(pixelWidth) / window.bounds.width
+        context.scaleBy(x: scale, y: scale)
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        if sessionStartTime == nil {
+            sessionStartTime = now
+            writer.startSession(atSourceTime: now)
+        }
+        let pts = CMTimeSubtract(now, sessionStartTime!)
+        adaptor.append(buffer, withPresentationTime: pts)
     }
 
     // ---------- 停止 ----------
 
     private func stopRecording(result: @escaping FlutterResult) {
-        guard writer != nil else {
+        guard let writer else {
             result(FlutterError(code: "NOT_RECORDING", message: "当前没有正在进行的录制", details: nil))
             return
         }
-        pendingStopResult = result
-        recorder.stopCapture { [weak self] _ in
+        pendingStop = result
+        displayLink?.invalidate()
+        displayLink = nil
+        micRecorder?.stop()
+        micRecorder = nil
+        videoInput?.markAsFinished()
+        writer.finishWriting { [weak self] in
             DispatchQueue.main.async {
-                self?.finishWriting()
+                self?.mergeMicAudioIfNeeded()
             }
         }
     }
 
-    private func finishWriting() {
-        guard let writer else { return }
-        let url = outputURL
+    /// 把麦克风 m4a 合成进视频（passthrough 不重编码）。
+    /// 任何一步失败都退回纯视频 —— 有画面总比没结果好。
+    private func mergeMicAudioIfNeeded() {
+        guard let writer, let videoURL = outputURL else { return }
         let duration = startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
-        // 先标记两条轨道不再收数据，finishWriting 才会正常收尾
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
-        writer.finishWriting { [weak self] in
-            guard let self else { return }
-            let success = writer.status == .completed
-            let result = self.pendingStopResult
-            self.reset()
-            guard let result else { return }
-            if success, let url {
-                result(["path": url.path, "duration_seconds": duration])
+
+        guard writer.status == .completed else {
+            let stop = pendingStop
+            let message = "视频写入失败（录制时间过短或磁盘空间不足）"
+            reset()
+            stop?(FlutterError(code: "STOP_FAILED", message: message, details: nil))
+            return
+        }
+
+        guard let micURL else {
+            finish(result: pendingStop, path: videoURL.path, duration: duration, micURL: nil)
+            return
+        }
+
+        let micAsset = AVURLAsset(url: micURL)
+        let videoAsset = AVURLAsset(url: videoURL)
+        let composition = AVMutableComposition()
+        guard
+            let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+            let sourceVideo = videoAsset.tracks(withMediaType: .video).first
+        else {
+            // 一帧都没画出来（比如立刻停止）—— 视频轨为空，返回错误而不是坏文件
+            let stop = pendingStop
+            reset()
+            stop?(FlutterError(code: "STOP_FAILED", message: "没有录到有效画面（录制时间过短）", details: nil))
+            return
+        }
+        try? videoTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: videoAsset.duration),
+            of: sourceVideo, at: .zero)
+
+        if let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid),
+           let sourceAudio = micAsset.tracks(withMediaType: .audio).first {
+            let micDuration = min(micAsset.duration, videoAsset.duration)
+            if micDuration.seconds > 0.5 {
+                try? audioTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: micDuration),
+                    of: sourceAudio, at: .zero)
             } else {
-                result(FlutterError(code: "STOP_FAILED", message: "视频写入失败", details: nil))
+                composition.removeTrack(audioTrack)
             }
         }
+
+        // 导出到临时文件再顶替原视频（导出目标不能是输入文件）
+        let mergedURL = videoURL.deletingLastPathComponent()
+            .appendingPathComponent(videoURL.deletingPathExtension().lastPathComponent + "+merged.mp4")
+        try? FileManager.default.removeItem(at: mergedURL)
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
+            finish(result: pendingStop, path: videoURL.path, duration: duration, micURL: micURL)
+            return
+        }
+        export.outputURL = mergedURL
+        export.outputFileType = .mp4
+        export.exportAsynchronously { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if export.status == .completed {
+                    // 顶替原视频
+                    try? FileManager.default.removeItem(at: videoURL)
+                    try? FileManager.default.moveItem(at: mergedURL, to: videoURL)
+                }
+                self.finish(result: self.pendingStop, path: videoURL.path, duration: duration, micURL: micURL)
+            }
+        }
+    }
+
+    private func finish(result: FlutterResult?, path: String, duration: Int, micURL: URL?) {
+        if let micURL {
+            try? FileManager.default.removeItem(at: micURL)
+        }
+        self.micURL = nil
+        let stop = result
+        reset()
+        stop?(["path": path, "duration_seconds": duration])
     }
 
     private func reset() {
         writer = nil
         videoInput = nil
-        audioInput = nil
+        adaptor = nil
+        if let pool = pixelPool {
+            CVPixelBufferPoolRelease(pool)
+        }
+        pixelPool = nil
+        displayLink?.invalidate()
+        displayLink = nil
+        targetWindow = nil
         outputURL = nil
-        startedSession = false
+        micURL = nil
+        micRecorder = nil
+        sessionStartTime = nil
         startedAt = nil
-        pendingStopResult = nil
+        pendingStop = nil
     }
 }
