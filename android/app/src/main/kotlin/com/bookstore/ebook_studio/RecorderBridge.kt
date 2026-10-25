@@ -228,7 +228,8 @@ class RecorderBridge(private val activity: Activity) : MethodChannel.MethodCallH
     // ---------- 逐帧抓取（captureThread） ----------
 
     private fun scheduleCapture() {
-        captureHandler?.post {
+        val handler = captureHandler ?: return
+        handler.post {
             if (!recording) return@post
             val window = activity.window
             var bitmap = windowBitmap
@@ -244,11 +245,11 @@ class RecorderBridge(private val activity: Activity) : MethodChannel.MethodCallH
                         drawFrame(bitmap)
                         drainVideo(endOfStream = false)
                     }
-                    captureHandler?.postDelayed({ scheduleCapture() }, 1000L / fps)
-                }, captureHandler)
+                    handler.postDelayed({ scheduleCapture() }, 1000L / fps)
+                }, handler)
             } catch (e: Exception) {
                 // 窗口尺寸突变等：跳过这一帧
-                captureHandler?.postDelayed({ scheduleCapture() }, 1000L / fps)
+                handler.postDelayed({ scheduleCapture() }, 1000L / fps)
             }
         }
     }

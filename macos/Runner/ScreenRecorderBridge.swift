@@ -84,8 +84,9 @@ class ScreenRecorderBridge: NSObject, FlutterPlugin {
 
         // Dart 传来的内容区矩形是「窗口内容（Flutter 视图）逻辑坐标、左上原点」；
         // 转成屏幕全局坐标（左下原点）给 CGWindowListCreateImage
-        let contentHeight = window.contentView.bounds.height
-        let crop = cropRect(from: args) ?? CGRect(x: 0, y: 0, width: contentHeight > 0 ? window.contentView.bounds.width : 0, height: contentHeight)
+        let contentBounds = window.contentView?.bounds ?? .zero
+        let contentHeight = contentBounds.height
+        let crop = cropRect(from: args) ?? CGRect(x: 0, y: 0, width: contentBounds.width, height: contentHeight)
         let viewRect = NSRect(x: crop.minX, y: contentHeight - crop.maxY, width: crop.width, height: crop.height)
         screenCropRect = window.convertToScreen(viewRect)
         windowID = CGWindowID(window.windowNumber)

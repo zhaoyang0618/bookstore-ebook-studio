@@ -91,8 +91,8 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
         // 输出分辨率（像素）：Dart 按 720p / 1080p / 跟随窗口算好传来
         let scale = window.screen.scale
         let outArgs = args?["out"] as? [String: Any]
-        var width = (outArgs?["w"] as? Int) ?? Int((cropRect!.width * scale).rounded(.down))
-        var height = (outArgs?["h"] as? Int) ?? Int((cropRect!.height * scale).rounded(.down))
+        var width = (outArgs?["w"] as? Int) ?? Int((cropRect.width * scale).rounded(.down))
+        var height = (outArgs?["h"] as? Int) ?? Int((cropRect.height * scale).rounded(.down))
         width -= width % 2  // 编码器要求偶数
         height -= height % 2
         guard width >= 16, height >= 16 else {
