@@ -11,7 +11,9 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr wchar_t kChannelName[] = L"ebook_studio/recorder";
+// Flutter C++ 的 channel 名是 UTF-8 窄字符串（MethodChannel 构造参数是
+// const std::string&，宽字符传不进去）
+constexpr char kChannelName[] = "ebook_studio/recorder";
 
 #ifndef PW_RENDERFULLCONTENT
 // Win8.1+ 才有定义：抓取 DirectComposition / D3D 内容（Flutter 是 ANGLE 渲染，必需）

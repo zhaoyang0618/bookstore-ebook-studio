@@ -7,9 +7,9 @@ plugins {
 
 android {
     namespace = "com.bookstore.ebook_studio"
-    // 显式 35：录课用的 MediaProjectionConfig / DisplayConfig（MIRROR_MODE_APP_ONLY）
-    // 是 API 34 引入的，Flutter 3.35.5 默认的 compileSdkVersion 解析不到这些类
-    compileSdk = 35
+    // 显式 36：录课用的 MediaProjectionConfig / DisplayConfig（MIRROR_MODE_APP_ONLY）
+    // 需要 API 34+；flutter_inappwebview 的 androidx.browser 1.9.0 更是要 36
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
