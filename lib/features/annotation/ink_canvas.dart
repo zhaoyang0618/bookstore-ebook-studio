@@ -12,8 +12,9 @@
 ///
 /// ## 输入设备
 ///
-/// 支持 `mouse` / `trackpad` / `touch` / `stylus`。
-/// 桌面端用鼠标或触控板即可书写；平板端用手写笔时压力值来自硬件。
+/// 支持 `mouse` / `touch` / `stylus` / `invertedStylus`。
+/// 桌面端用鼠标书写；平板端手指 / 手写笔（压力来自硬件）。
+/// 触控板（trackpad）不画线，只做平移缩放手势。
 ///
 /// @module ebook-studio/features/annotation/ink_canvas
 library;
@@ -230,12 +231,15 @@ class _InkCanvasState extends State<InkCanvas> {
   InkStroke? _current;
   DateTime? _strokeStart;
 
+  /// 触控板「直接触摸」指针（kind == trackpad）**不参与画线**：
+  /// macOS 上双指滑动会被间歇性地路由成裸指针事件，一旦参与画线
+  /// 就会出现「双指划动画出线」的怪象。触控板一律通过滚轮 /
+  /// PointerPanZoom 事件平移缩放（见各录制/画布的 pan 处理）。
   bool _isDrawingDevice(PointerDeviceKind kind) =>
       kind == PointerDeviceKind.mouse ||
       kind == PointerDeviceKind.touch ||
       kind == PointerDeviceKind.stylus ||
-      kind == PointerDeviceKind.invertedStylus ||
-      kind == PointerDeviceKind.trackpad;
+      kind == PointerDeviceKind.invertedStylus;
 
   /// 鼠标 / 触控板没有压感，统一给 1，避免笔迹被画得过细。
   double _pressureOf(PointerEvent event) {

@@ -543,6 +543,10 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    // 触控板「直接触摸」指针不参与任何交互（画线 / 双指逻辑都不进）：
+    // macOS 双指滑动时而被路由成裸指针，参与画线就会误画。
+    // 触控板只通过 PointerPanZoom / PointerScroll 事件平移缩放。
+    if (event.kind == PointerDeviceKind.trackpad) return;
     _pointers[event.pointer] = event.position;
     // 第二根手指落下：取消正在画的笔（两指 = 平移/缩放手势）
     if (_pointers.length == 2 && _current != null) {
@@ -585,6 +589,7 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    if (event.kind == PointerDeviceKind.trackpad) return;
     if (_pointers.containsKey(event.pointer)) {
       _pointers[event.pointer] = event.position;
     }
@@ -617,6 +622,8 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   }
 
   void _onPointerUp(PointerEvent event) {
+    // trackpad 指针从未参与：提前忽略，避免误提交正在画的笔迹
+    if (event.kind == PointerDeviceKind.trackpad) return;
     _pointers.remove(event.pointer);
     if (_panPointer == event.pointer) {
       _panPointer = null;
