@@ -7,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../library/library_page.dart';
 import '../reader/reader_page.dart';
 import '../features/notebook/notes_page.dart';
-import '../features/recorder/record_page.dart';
 import '../features/translation/translate_page.dart';
 import 'routes.dart';
 import 'ui/desktop/desktop_layout.dart';
@@ -48,7 +47,6 @@ class _ResponsiveShell extends StatelessWidget {
       AppRoute.library => const LibraryPage(),
       AppRoute.reader => const ReaderPage(),
       AppRoute.notes => const NotesPage(),
-      AppRoute.record => const RecordPage(),
       AppRoute.translate => const TranslatePage(),
     };
     return width >= _desktopBreakpoint ? DesktopLayout(route: route, body: body) : TabletLayout(route: route, body: body);

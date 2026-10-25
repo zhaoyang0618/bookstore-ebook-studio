@@ -1,11 +1,14 @@
-/// 录课落盘逻辑测试：文件命名、元数据构造、仓库（导入/列出/删除）。
+/// 录课落盘逻辑测试：文件命名、元数据构造、仓库（导入/列出/删除）、
+/// 内容录制的分辨率计算（computeCapture）与目录清洗（sanitizeRelativeDir）。
 library;
 
 import 'dart:io';
 
 import 'package:ebook_studio/features/recorder/recording_catalog.dart';
+import 'package:ebook_studio/features/recorder/recording_panel.dart';
 import 'package:ebook_studio/models/mylibrary_models.dart';
 import 'package:ebook_studio/storage/my_library_store.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Book makeBook({
@@ -184,6 +187,76 @@ void main() {
       final repository = RecordingRepository(temp.path);
       File('${temp.path}/bad.json').writeAsStringSync('not json at all');
       expect(repository.list(), isEmpty);
+    });
+  });
+
+  group('内容录制：computeCapture（分辨率计算）', () {
+    test('1080p：短边缩放到 1080（横屏 16:9 → 1920×1080 惯例），宽高取偶', () {
+      // 横向内容 1600×900 逻辑像素 @1x
+      final plan = computeCapture(const Rect.fromLTWH(0, 0, 1600, 900), 1.0, RecordingResolution.p1080);
+      expect(plan.outH, 1080);
+      expect(plan.outW, 1920);
+      expect(plan.cropLogical, const Rect.fromLTWH(0, 0, 1600, 900));
+    });
+
+    test('720p：竖向内容（笔记页 A4）短边缩放到 720', () {
+      final plan = computeCapture(const Rect.fromLTWH(0, 0, 620, 877), 1.0, RecordingResolution.p720);
+      expect(plan.outW, 720);
+      expect(plan.outH, 1016); // 877×720/620 = 1018.06 → 取偶 1016
+    });
+
+    test('跟随窗口：物理像素原样输出（逻辑 × DPR），偶数对齐', () {
+      final plan = computeCapture(const Rect.fromLTWH(10, 20, 800, 600), 2.0, RecordingResolution.native);
+      expect(plan.cropLogical, const Rect.fromLTWH(20, 40, 1600, 1200));
+      expect(plan.outW, 1600);
+      expect(plan.outH, 1200);
+    });
+
+    test('奇数尺寸被取整到偶数（编码器要求）', () {
+      final plan = computeCapture(const Rect.fromLTWH(0, 0, 801, 601), 1.0, RecordingResolution.native);
+      expect(plan.outW, 800);
+      expect(plan.outH, 600);
+      expect(plan.cropLogical.width, 800);
+    });
+
+    test('带偏移的裁剪矩形：起点同样乘 DPR', () {
+      final plan = computeCapture(const Rect.fromLTWH(5, 7, 640, 480), 2.0, RecordingResolution.p720);
+      expect(plan.cropLogical.left, 10);
+      expect(plan.cropLogical.top, 14);
+      // 裁剪 1280×960 → 短边 960 缩放到 720
+      expect(plan.outW, 960);
+      expect(plan.outH, 720);
+    });
+  });
+
+  group('笔记本文件夹：sanitizeRelativeDir', () {
+    test('正常目录名', () {
+      expect(sanitizeRelativeDir('notebooks'), 'notebooks');
+      expect(sanitizeRelativeDir('  notes  '), 'notes');
+      expect(sanitizeRelativeDir('notes/math'), 'notes/math');
+      expect(sanitizeRelativeDir(null), isNull);
+      expect(sanitizeRelativeDir('   '), isNull);
+    });
+
+    test('拒绝绝对路径、越级与空段', () {
+      expect(sanitizeRelativeDir('/etc'), isNull);
+      expect(sanitizeRelativeDir('C:\\tmp'), isNull);
+      expect(sanitizeRelativeDir('a/../b'), isNull);
+      expect(sanitizeRelativeDir('a//b'), isNull);
+      expect(sanitizeRelativeDir('./a'), isNull);
+    });
+  });
+
+  group('应用设置：settings.json 读写（笔记本文件夹）', () {
+    test('缺省值 + 往返 + 损坏兜底', () {
+      final store = MyLibraryStore(temp.path);
+      expect(store.readSettings().notebooksDir, 'notebooks');
+
+      store.writeSettings(const LibrarySettings(notebooksDir: 'notes/math'));
+      expect(store.readSettings().notebooksDir, 'notes/math');
+
+      File('${temp.path}/settings.json').writeAsStringSync('{ bad json');
+      expect(store.readSettings().notebooksDir, 'notebooks');
     });
   });
 }

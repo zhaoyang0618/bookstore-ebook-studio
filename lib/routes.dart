@@ -4,7 +4,10 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// 顶层路由。
-enum AppRoute { library, reader, notes, record, translate }
+///
+/// 录课不再是独立页面：它是阅读器与笔记编辑器的子功能
+/// （见 features/recorder/recording_panel.dart）。
+enum AppRoute { library, reader, notes, translate }
 
 /// 当前路由。
 final appRouteProvider = StateProvider<AppRoute>((ref) => AppRoute.library);

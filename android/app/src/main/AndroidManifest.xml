@@ -1,9 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 录课（设计文档 3.5）：麦克风 + 前台服务 + 通知 -->
+    <!-- 录课（设计文档 3.5）：PixelCopy 抓自己窗口无需投屏授权，只需麦克风 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="ebook_studio"
         android:name="${applicationName}"
@@ -30,11 +27,6 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <!-- 录制前台服务：Android 14+ 要求 getMediaProjection 前已在运行 -->
-        <service
-            android:name=".RecordingForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -32,6 +32,7 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
     private var displayLink: CADisplayLink?
 
     private weak var targetWindow: UIWindow?
+    private var cropRect: CGRect = .zero
     private var pixelWidth = 0
     private var pixelHeight = 0
 
@@ -76,17 +77,28 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
             result(FlutterError(code: "UNAVAILABLE", message: "找不到应用窗口", details: nil))
             return
         }
+        targetWindow = window
 
+        // 裁剪区域（窗口内容逻辑坐标，Dart 传内容区矩形）；缺省 = 整个窗口
+        if let crop = args?["crop"] as? [String: Any],
+           let x = crop["x"] as? Double, let y = crop["y"] as? Double,
+           let w = crop["w"] as? Double, let h = crop["h"] as? Double, w >= 2, h >= 2 {
+            cropRect = CGRect(x: x, y: y, width: w, height: h)
+        } else {
+            cropRect = window.bounds
+        }
+
+        // 输出分辨率（像素）：Dart 按 720p / 1080p / 跟随窗口算好传来
         let scale = window.screen.scale
-        var width = Int((window.bounds.width * scale).rounded(.down))
-        var height = Int((window.bounds.height * scale).rounded(.down))
+        let outArgs = args?["out"] as? [String: Any]
+        var width = (outArgs?["w"] as? Int) ?? Int((cropRect!.width * scale).rounded(.down))
+        var height = (outArgs?["h"] as? Int) ?? Int((cropRect!.height * scale).rounded(.down))
         width -= width % 2  // 编码器要求偶数
         height -= height % 2
         guard width >= 16, height >= 16 else {
-            result(FlutterError(code: "UNAVAILABLE", message: "窗口尺寸过小，无法录制", details: nil))
+            result(FlutterError(code: "UNAVAILABLE", message: "内容区尺寸过小，无法录制", details: nil))
             return
         }
-        targetWindow = window
         pixelWidth = width
         pixelHeight = height
 
@@ -210,9 +222,11 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
         context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
         context.translateBy(x: 0, y: CGFloat(pixelHeight))
         context.scaleBy(x: 1, y: -1)
-        // 窗口逻辑尺寸 → 像素尺寸
-        let scale = CGFloat(pixelWidth) / window.bounds.width
-        context.scaleBy(x: scale, y: scale)
+        // 窗口坐标 → 裁剪区域 → 目标分辨率（裁剪外自动落在画布之外）
+        let scaleX = CGFloat(pixelWidth) / cropRect.width
+        let scaleY = CGFloat(pixelHeight) / cropRect.height
+        context.scaleBy(x: scaleX, y: scaleY)
+        context.translateBy(x: -cropRect.minX, y: -cropRect.minY)
         window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
 
         let now = CMClockGetTime(CMClockGetHostTimeClock())
@@ -335,6 +349,7 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
         displayLink?.invalidate()
         displayLink = nil
         targetWindow = nil
+        cropRect = .zero
         outputURL = nil
         micURL = nil
         micRecorder = nil

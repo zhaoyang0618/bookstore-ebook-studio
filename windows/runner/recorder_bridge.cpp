@@ -1,5 +1,6 @@
 #include "recorder_bridge.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -133,6 +134,9 @@ void RecorderBridge::HandleMethodCall(
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   if (call.method_name().compare("startRecording") == 0) {
     int fps = 30;
+    CaptureRegion crop;
+    int out_w = 0;
+    int out_h = 0;
     if (const auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
       const auto fps_it = args->find(flutter::EncodableValue("fps"));
       if (fps_it != args->end()) {
@@ -140,14 +144,43 @@ void RecorderBridge::HandleMethodCall(
           fps = *fps_value;
         }
       }
+      // 裁剪矩形（客户区物理像素；缺省 = 整窗）
+      if (const auto crop_it = args->find(flutter::EncodableValue("crop")); crop_it != args->end()) {
+        if (const auto* crop_map = std::get_if<flutter::EncodableMap>(&crop_it->second)) {
+          const auto num = [crop_map](const char* key) -> double {
+            const auto it = crop_map->find(flutter::EncodableValue(key));
+            if (it == crop_map->end()) return 0;
+            if (const auto* v = std::get_if<int32_t>(&it->second)) return *v;
+            if (const auto* v = std::get_if<double>(&it->second)) return *v;
+            return 0;
+          };
+          crop.x = static_cast<int>(num("x"));
+          crop.y = static_cast<int>(num("y"));
+          crop.w = static_cast<int>(num("w"));
+          crop.h = static_cast<int>(num("h"));
+        }
+      }
+      // 输出分辨率（像素；0 = 用裁剪区域原尺寸）
+      if (const auto out_it = args->find(flutter::EncodableValue("out")); out_it != args->end()) {
+        if (const auto* out_map = std::get_if<flutter::EncodableMap>(&out_it->second)) {
+          const auto int_at = [out_map](const char* key) -> int {
+            const auto it = out_map->find(flutter::EncodableValue(key));
+            if (it == out_map->end()) return 0;
+            if (const auto* v = std::get_if<int32_t>(&it->second)) return *v;
+            return 0;
+          };
+          out_w = int_at("w");
+          out_h = int_at("h");
+        }
+      }
     }
-    const std::string error = StartRecording(fps);
+    const std::string error = StartRecording(fps, crop, out_w, out_h);
     if (error.empty()) {
       result->Success(nullptr);
     } else {
       result->Error("START_FAILED", error, nullptr);
     }
-    } else if (call.method_name().compare("stopRecording") == 0) {
+  } else if (call.method_name().compare("stopRecording") == 0) {
     int64_t seconds = 0;
     const std::string error = StopRecording(&seconds);
     if (error.empty()) {
@@ -164,7 +197,7 @@ void RecorderBridge::HandleMethodCall(
   }
 }
 
-std::string RecorderBridge::StartRecording(int fps) {
+std::string RecorderBridge::StartRecording(int fps, const CaptureRegion& crop, int out_w, int out_h) {
   if (recording_.load()) {
     return "已经在录制中";
   }
@@ -177,12 +210,28 @@ std::string RecorderBridge::StartRecording(int fps) {
 
   RECT client;
   GetClientRect(window_, &client);
-  // 编码器要求偶数尺寸
-  const int width = (client.right - client.left) & ~1;
-  const int height = (client.bottom - client.top) & ~1;
-  if (width < 16 || height < 16) {
-    return "窗口尺寸过小，无法录制";
-  }
+  const int client_w = client.right - client.left;
+  const int client_h = client.bottom - client.top;
+
+  // 裁剪区域：默认整窗；钳制到客户区内，偶数对齐（编码器要求）
+  int crop_x = crop.x;
+  int crop_y = crop.y;
+  int crop_w = crop.w > 0 ? crop.w : client_w;
+  int crop_h = crop.h > 0 ? crop.h : client_h;
+  crop_x = std::clamp(crop_x, 0, std::max(0, client_w - 2));
+  crop_y = std::clamp(crop_y, 0, std::max(0, client_h - 2));
+  crop_w = std::clamp(crop_w, 2, client_w - crop_x);
+  crop_h = std::clamp(crop_h, 2, client_h - crop_y);
+  crop_w &= ~1;
+  crop_h &= ~1;
+  crop_ = CaptureRegion{crop_x, crop_y, crop_w, crop_h};
+
+  // 输出尺寸：Dart 按分辨率档位算好传来；缺省 = 裁剪区域原尺寸
+  out_w = out_w > 0 ? out_w : crop_w;
+  out_h = out_h > 0 ? out_h : crop_h;
+  out_w = std::clamp(out_w & ~1, 16, 7680);
+  out_h = std::clamp(out_h & ~1, 16, 4320);
+
   if (fps < 1 || fps > 60) {
     fps = 30;
   }
@@ -207,7 +256,7 @@ std::string RecorderBridge::StartRecording(int fps) {
       break;
     }
 
-    // 输出：H.264
+    // 输出：H.264（尺寸 = 输出分辨率）
     hr = MFCreateMediaType(&out_type);
     if (SUCCEEDED(hr)) {
       hr = out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -216,7 +265,7 @@ std::string RecorderBridge::StartRecording(int fps) {
       hr = out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
     }
     if (SUCCEEDED(hr)) {
-      hr = MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE, width, height);
+      hr = MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE, out_w, out_h);
     }
     if (SUCCEEDED(hr)) {
       hr = MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE, fps, 1);
@@ -251,7 +300,7 @@ std::string RecorderBridge::StartRecording(int fps) {
       hr = in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
     }
     if (SUCCEEDED(hr)) {
-      hr = MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE, width, height);
+      hr = MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE, out_w, out_h);
     }
     if (SUCCEEDED(hr)) {
       hr = MFSetAttributeRatio(in_type.Get(), MF_MT_FRAME_RATE, fps, 1);
@@ -283,16 +332,16 @@ std::string RecorderBridge::StartRecording(int fps) {
   }
 
   // 固定尺寸的目标 DIB（SinkWriter 的尺寸不能中途改；窗口缩放时靠 StretchBlt 缩放）
-  if (!CreateDib(&target_dc_, &target_dib_, &target_bits_, width, height)) {
+  if (!CreateDib(&target_dc_, &target_dib_, &target_bits_, out_w, out_h)) {
     SafeRelease(sink_writer_);
     sink_writer_ = nullptr;
     MFShutdown();
     DeleteFileW(output_path_w_.c_str());
     return "无法创建采集缓冲";
   }
-  target_stride_ = width * 4;
-  capture_w_ = width;
-  capture_h_ = height;
+  target_stride_ = out_w * 4;
+  capture_w_ = out_w;
+  capture_h_ = out_h;
 
   LARGE_INTEGER freq;
   QueryPerformanceFrequency(&freq);
@@ -328,9 +377,14 @@ void RecorderBridge::CaptureLoop(LONGLONG frame_interval_100ns) {
         }
         if (scratch_dc_ != nullptr &&
             PrintWindow(window_, scratch_dc_, PW_RENDERFULLCONTENT)) {
-          // 统一缩放到固定目标尺寸（尺寸相同时等于直接拷贝）
+          // 裁剪子矩形 → 目标分辨率（含窗口缩放跟随与裁剪，一次完成）
+          const int src_x = std::clamp(crop_.x, 0, std::max(0, w - 2));
+          const int src_y = std::clamp(crop_.y, 0, std::max(0, h - 2));
+          const int src_w = std::clamp(crop_.w, 2, w - src_x);
+          const int src_h = std::clamp(crop_.h, 2, h - src_y);
           SetStretchBltMode(target_dc_, HALFTONE);
-          StretchBlt(target_dc_, 0, 0, capture_w_, capture_h_, scratch_dc_, 0, 0, w, h, SRCCOPY);
+          StretchBlt(target_dc_, 0, 0, capture_w_, capture_h_, scratch_dc_, src_x, src_y,
+                     src_w, src_h, SRCCOPY);
 
           LARGE_INTEGER counter;
           QueryPerformanceCounter(&counter);

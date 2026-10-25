@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../../library/library_page.dart';
+import '../../storage/my_library_store.dart';
 import 'notebook_editor.dart';
 import 'notebook_store.dart';
 
@@ -34,12 +35,16 @@ class _NotesPageState extends ConsumerState<NotesPage> {
     unawaited(_reload());
   }
 
-  /// 笔记本目录：MyLibrary 优先，退回应用文档目录。
+  /// 笔记本目录：MyLibrary 下的可配置子文件夹（settings.json），
+  /// 未配置图书馆时退回应用文档目录 `notebooks/`。
   Future<String> _resolveDir() async {
     final root = ref.read(libraryRootProvider);
-    if (root != null && root.isNotEmpty) return p.join(root, 'notebooks');
-    final docs = await getApplicationDocumentsDirectory();
-    return p.join(docs.path, 'notebooks');
+    if (root == null || root.isEmpty) {
+      final docs = await getApplicationDocumentsDirectory();
+      return p.join(docs.path, 'notebooks');
+    }
+    final settings = MyLibraryStore(root, clientId: 'flutter-app-client').readSettings();
+    return p.join(root, settings.notebooksDir);
   }
 
   Future<void> _reload() async {
@@ -52,6 +57,61 @@ class _NotesPageState extends ConsumerState<NotesPage> {
     }
     if (!mounted) return;
     setState(() => _notebooks = _store!.list());
+  }
+
+  /// 设置笔记本文件夹（相对 MyLibrary 根；随图书馆一起同步）。
+  Future<void> _openFolderSettings() async {
+    final root = ref.read(libraryRootProvider);
+    if (root == null || root.isEmpty || _store == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('未配置图书馆 —— 笔记本保存在应用文档目录，配置图书馆后才能自定义文件夹并同步')),
+      );
+      return;
+    }
+    final settings = MyLibraryStore(root, clientId: 'flutter-app-client').readSettings();
+    final controller = TextEditingController(text: settings.notebooksDir);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('笔记本文件夹'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('相对 MyLibrary 根目录的子文件夹（随图书馆同步到网盘）：\n$root',
+                style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: '子文件夹', hintText: 'notebooks'),
+              onSubmitted: (value) => Navigator.pop(context, value),
+            ),
+            const SizedBox(height: 8),
+            Text('更改后，旧文件夹里的笔记本不会自动移动。',
+                style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('保存')),
+        ],
+      ),
+    );
+    if (result == null) return;
+    final sanitized = sanitizeRelativeDir(result);
+    if (sanitized == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('文件夹名不可用（不能为空、绝对路径或包含 ..）')),
+        );
+      }
+      return;
+    }
+    MyLibraryStore(root, clientId: 'flutter-app-client')
+        .writeSettings(LibrarySettings(notebooksDir: sanitized));
+    _store = null; // 强制按新目录重建
+    await _reload();
   }
 
   Future<void> _createNotebook() async {
@@ -138,6 +198,11 @@ class _NotesPageState extends ConsumerState<NotesPage> {
       appBar: AppBar(
         title: const Text('笔记'),
         actions: [
+          IconButton(
+            tooltip: '笔记本文件夹',
+            icon: const Icon(Icons.folder_open),
+            onPressed: _openFolderSettings,
+          ),
           IconButton(
             tooltip: '新建笔记本',
             icon: const Icon(Icons.note_add),

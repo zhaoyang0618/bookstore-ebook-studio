@@ -21,6 +21,7 @@ class MyLibraryLayout {
 
   static const String manifestFile = 'manifest.json';
   static const String libraryFile = 'library.json';
+  static const String settingsFile = 'settings.json';
   static const String requestsDir = 'requests';
   static const String wikiDir = 'wiki';
   static const String booksDir = 'books';
@@ -31,6 +32,7 @@ class MyLibraryLayout {
 
   String get manifestPath => p.join(root, manifestFile);
   String get libraryPath => p.join(root, libraryFile);
+  String get settingsPath => p.join(root, settingsFile);
   String get requestsPath => p.join(root, requestsDir);
   String get wikiIndexPath => p.join(root, wikiDir, 'index.json');
   String get wikiPagesPath => p.join(root, wikiDir, wikiPagesDir);
@@ -287,6 +289,41 @@ class Recording {
         'linked_wiki_pages': linkedWikiPages,
         if (transcript != null) 'transcript': transcript,
       };
+}
+
+/// 应用侧设置（MyLibrary/settings.json）。
+///
+/// 刻意**不进** library.json / manifest 的数据契约 —— 这是 App 本地的
+/// 偏好（TS 版会无视这个文件）。目前只有笔记本文件夹。
+class LibrarySettings {
+  const LibrarySettings({this.notebooksDir = 'notebooks'});
+
+  /// 笔记本文件夹，相对 MyLibrary 根（默认 `notebooks/`）。
+  final String notebooksDir;
+
+  factory LibrarySettings.fromJson(Map<String, dynamic> json) => LibrarySettings(
+        notebooksDir: sanitizeRelativeDir(json['notebooks_dir'] as String?) ?? 'notebooks',
+      );
+
+  Map<String, dynamic> toJson() => {'notebooks_dir': notebooksDir};
+}
+
+/// 把用户输入清洗成安全的相对子目录。
+///
+/// 返回 null 表示不可用（空 / 绝对路径 / 含 `..` 越级）。
+/// 允许嵌套（如 `notes/math`），统一正斜杠，去首尾斜杠。
+String? sanitizeRelativeDir(String? input) {
+  if (input == null) return null;
+  final trimmed = input.trim().replaceAll('\\', '/');
+  // 绝对路径判定必须在剥掉前导斜杠**之前**（'/etc' 不是合法的相对目录）
+  if (trimmed.isEmpty || p.isAbsolute(trimmed) || RegExp(r'^[a-zA-Z]:').hasMatch(trimmed)) {
+    return null;
+  }
+  final stripped = trimmed.replaceAll(RegExp(r'^/+|/+$'), '');
+  if (stripped.isEmpty) return null;
+  final parts = stripped.split('/');
+  if (parts.any((part) => part.isEmpty || part == '.' || part == '..')) return null;
+  return p.normalize(stripped).replaceAll('\\', '/');
 }
 
 /// MyLibrary 目录的本地访问层。
@@ -580,6 +617,28 @@ class MyLibraryStore {
 
   /// 大文件分片上传的进度文件（1.8.6）。
   String partsDir(String fileName, String bookId) => p.join(layout.booksPath, bookId, MyLibraryLayout.recordingsDirname, '$fileName.parts');
+
+  // ---------- 应用侧设置（settings.json，非契约文件） ----------
+
+  /// 读取应用设置；文件缺失 / 损坏时返回默认值（偏好丢了不该报错）。
+  LibrarySettings readSettings() {
+    final file = File(layout.settingsPath);
+    if (!file.existsSync()) return const LibrarySettings();
+    try {
+      final json = _decode(file.readAsStringSync());
+      return LibrarySettings.fromJson(json);
+    } on MyLibraryException {
+      return const LibrarySettings();
+    } on FormatException {
+      return const LibrarySettings();
+    }
+  }
+
+  LibrarySettings writeSettings(LibrarySettings settings) {
+    Directory(root).createSync(recursive: true);
+    File(layout.settingsPath).writeAsStringSync('${_encoder.convert(settings.toJson())}\n');
+    return settings;
+  }
 
   // ---------- 同步请求队列（1.8.4） ----------
 

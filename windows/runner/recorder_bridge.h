@@ -14,6 +14,14 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 
+// 裁剪区域（窗口客户区物理像素；w/h<=0 表示整窗）。
+struct CaptureRegion {
+  int x = 0;
+  int y = 0;
+  int w = 0;
+  int h = 0;
+};
+
 // 录课桥接（设计文档 3.5：Windows 桌面端）。
 //
 // 用 PrintWindow(PW_RENDERFULLCONTENT) 逐帧抓取**本应用窗口**的内容
@@ -37,7 +45,7 @@ class RecorderBridge {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   // 成功返回空串，失败返回原因（直接透给 Dart）。
-  std::string StartRecording(int fps);
+  std::string StartRecording(int fps, const CaptureRegion& crop, int out_w, int out_h);
   std::string StopRecording(int64_t* seconds_out);
 
   // 采集线程主体：定时 PrintWindow → 写帧。
@@ -54,6 +62,7 @@ class RecorderBridge {
   std::string output_path_;   // UTF-8，回传 Dart 用
   std::wstring output_path_w_;  // 宽字符，文件系统用（中文用户名不乱码）
   int fps_ = 30;
+  CaptureRegion crop_;        // 内容区裁剪（客户区物理像素，每帧钳制到窗口内）
   LONGLONG start_tick_ = 0;   // QPC 计数
   LONGLONG tick_freq_ = 1;    // QPC 频率
 

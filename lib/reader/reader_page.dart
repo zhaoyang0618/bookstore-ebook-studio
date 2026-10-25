@@ -16,6 +16,8 @@ import '../features/annotation/ink_canvas.dart';
 import '../features/annotation/pdf_ink.dart';
 import '../pdf/pdf_ink_export.dart';
 import '../features/annotation/annotation_panel.dart';
+import '../features/recorder/recording_catalog.dart' show recordingsDirOf;
+import '../features/recorder/recording_panel.dart';
 import '../library/library_page.dart';
 import '../models/mylibrary_models.dart';
 import '../storage/my_library_store.dart';
@@ -37,6 +39,10 @@ class ReaderPage extends ConsumerStatefulWidget {
 class _ReaderPageState extends ConsumerState<ReaderPage> {
   BookEngine? _engine;
   bool _inkMode = false;
+  bool _recordingMode = false;
+
+  /// 被录的内容区（阅读区域，不含进度条与工具栏）。
+  final GlobalKey _contentKey = GlobalKey();
 
   /// PDF 墨迹层：负责坐标映射与按页存取（见 features/annotation/pdf_ink.dart）。
   final PdfInkController _ink = PdfInkController();
@@ -425,6 +431,26 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
     ref.read(readingProgressProvider.notifier).state = position.percentage;
   }
 
+  /// 录像落点：图书馆书 → 书目录 recordings/；独立文件 → 文档 recordings/。
+  RecordingTarget _recordingTarget(Book book, String? root) {
+    if (root != null) {
+      return RecordingTarget(
+        scopeLabel: '电子书',
+        resolveDir: () async => p.join(root, recordingsDirOf(book)),
+        bookId: book.id,
+        ownerTitle: book.title,
+        positionAtStart: book.readingPosition?.position,
+        audioSupported: !Platform.isWindows,
+      );
+    }
+    return RecordingTarget(
+      scopeLabel: '电子书',
+      resolveDir: standaloneRecordingsDir,
+      ownerTitle: book.title,
+      audioSupported: !Platform.isWindows,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final libraryBook = ref.watch(selectedBookProvider);
@@ -474,6 +500,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
             icon: const Icon(Icons.sticky_note_2_outlined),
             onPressed: () => _showAnnotations(context, annotations),
           ),
+          // 录课子功能（设计文档 3.5）：只录阅读内容区
+          IconButton(
+            tooltip: _recordingMode ? '退出录制' : '录制讲解（仅录内容区）',
+            icon: Icon(_recordingMode ? Icons.videocam_off : Icons.videocam_outlined),
+            onPressed: () => setState(() => _recordingMode = !_recordingMode),
+          ),
           if (_engine is PdfEngine)
             IconButton(
               tooltip: '写入 PDF 原生注释',
@@ -487,6 +519,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           LinearProgressIndicator(value: progress, minHeight: 3),
           Expanded(
             child: Stack(
+              key: _contentKey,
               children: [
                 // 阅读区：由引擎负责渲染（PDF / EPUB / Markdown / TXT）
                 Positioned.fill(
@@ -498,7 +531,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
                     inkMode: _inkMode,
                   ),
                 ),
-                // 手写标注层（设计文档 3.3：矢量笔迹）
+                // 手写标注层（设计文档 3.3：矢量笔迹）—— 录制时会被录进去
                 if (_inkMode)
                   Positioned.fill(
                     child: InkCanvas(
@@ -515,7 +548,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
           ),
         ],
       ),
-      bottomNavigationBar: SafeArea(
+      bottomNavigationBar: _recordingMode
+          ? RecordingPanel(
+              target: _recordingTarget(book, effectiveRoot),
+              contentKey: _contentKey,
+            )
+          : SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: _inkMode

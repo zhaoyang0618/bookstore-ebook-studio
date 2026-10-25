@@ -142,43 +142,46 @@ pypdf    → 第 1 页 34 条注释，其中 Ink 2 条
 
 ## 录课（设计文档 3.5，已完整实现）
 
-四个平台各自用「最合适自己」的原生管线，**优先只录本应用窗口**（不录别的
-应用和桌面，也省掉不必要的权限）：
+录课是**阅读器与笔记编辑器里的子功能**（导航栏没有独立入口）：点工具栏的
+摄像机图标进入录制模式，**只录内容区域** —— 阅读内容 / 笔记页面，不带
+应用的界面框架。手写标注会在录制时一起录进去。
 
-| 平台 | 范围 | 实现 | 权限 |
+**机制**：Dart 把内容区在窗口内的矩形与目标分辨率（720p / 1080p /
+跟随窗口，档位语义 = 短边像素）传给原生，原生各自实现
+「抓窗口 → 裁剪 → 缩放 → 编码 MP4」：
+
+| 平台 | 抓取 | 权限 | 音频 |
 |---|---|---|---|
-| iOS | 仅本应用窗口 | `drawHierarchy` 逐帧渲染自己的视图树 → `AVAssetWriter`（H.264）；麦克风 `AVAudioRecorder` 单独录 m4a，停止后 `AVMutableComposition` passthrough 合成（`ReplayKitBridge.swift`） | 只需麦克风（**不需要**屏幕录制权限） |
-| Android 14+ | 用户在系统弹窗里选 | MediaProjection + MediaRecorder + `mediaProjection` 前台服务（`MediaProjectionBridge.kt`）；**只做 14+** —— 系统授权框自带「单个应用 / 整个屏幕」选择（API 34 的 app screen sharing），App 侧没有强制只录本应用的 API，低版本直接提示不支持 | 系统投屏授权 + 麦克风 |
-| Windows | 仅本应用窗口 | `PrintWindow(PW_RENDERFULLCONTENT)` 逐帧抓取（Flutter 是 ANGLE/D3D 渲染，必须带此 flag）+ Media Foundation SinkWriter 编码 H.264（`windows/runner/recorder_bridge.cpp`，纯 Win32/COM，不引 C++/WinRT）；v1 暂不含音频 | 无需额外权限 |
-| macOS | 整个屏幕 | `AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（`ScreenRecorderBridge.swift`） | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC「麦克风」 |
-| Linux | 未实现 | 界面直接给出明确提示（规划：PipeWire） | — |
+| iOS | `drawHierarchy` 渲染窗口 + CGContext 裁剪缩放 | 只需麦克风（**不需要**屏幕录制权限） | 麦克风 → m4a → passthrough 合成 |
+| Android | `PixelCopy` 抓自己窗口 + MediaCodec/MediaMuxer | 只需麦克风（**无需投屏授权弹窗**，API 26+） | AudioRecord + AAC 同轨编码 |
+| Windows | `PrintWindow(PW_RENDERFULLCONTENT)` + Media Foundation | 无 | v1 暂不支持 |
+| macOS | `CGWindowListCreateImage` 抓自己窗口裁剪 | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC 麦克风 | AVCaptureAudioDataOutput 采样 |
+
+录课开始前笔记会**自动复位缩放**（整页入镜）；录制中翻页、翻书都会被录
+进去。内容区矩形在开始时确定，窗口缩放不跟随（v1）。
 
 ### 视频保存到哪里
 
-- **录制图书馆里的书** → `MyLibrary/books/{书名}/recordings/`，
-  视频 + 同名 JSON 元数据，随图书馆跨设备同步
-- **独立模式（没选书）** → 应用文档目录的 `recordings/`：
-  | 平台 | 路径 |
-  |---|---|
-  | macOS（沙箱） | `~/Library/Containers/com.bookstore.ebookStudio/Data/Documents/recordings/` |
-  | Windows | `C:\Users\{用户}\Documents\recordings\` |
-  | iOS | 应用沙箱 `Documents/recordings/` |
-  | Android | `/data/user/0/com.bookstore.ebook_studio/app_flutter/recordings/` |
+- **从阅读器录制** → 该书的 `MyLibrary/books/{书名}/recordings/`
+  （元数据带 `book_id` 与 `position_at_start`，随图书馆跨设备同步）
+- **从笔记录制** → `MyLibrary/recordings/`（元数据 `book_id` 为
+  `notebook:{id}`，笔记本编辑器的「录制记录」只列本笔记本的）
+- **独立模式**（未配置图书馆）→ 应用文档目录 `recordings/`
 
-  录课页的「录制记录」上方会显示**当前实际**的保存位置。
+「录制记录」面板会显示当前实际保存位置。
+
+**为什么 Android 弃用 MediaProjection**：它只能镜像整个屏幕（系统没有
+强制「只录本应用」的 API），且 Android 14+ 需要授权弹窗 + 前台服务。
+PixelCopy 抓自己的窗口没有这些限制，还把支持版本下探到 Android 8。
 
 **为什么 iOS 不用 ReplayKit**：ReplayKit 只有「录整个屏幕」一种（采样缓冲
 模式也一样），系统没有「只录自己窗口」的 API，而且要屏幕录制权限。
 `drawHierarchy` 渲染窗口层级就能拿到本应用内容 —— 代价是系统弹窗、键盘等
 不在窗口层级内的东西录不进去（对录课场景恰好是优点），且切后台时画面定格。
 
-**为什么 macOS 还是全屏**：窗口级要换 ScreenCaptureKit
-（`SCContentFilter(desktopIndependentWindow:)`，macOS 12.3+），且麦克风要
-走独立采样管线（SCK 只给系统音频）——收益不大、风险不小，待后续版本。
-
-**Android 14+ 的坑**：`getMediaProjection()` 前必须已有 `mediaProjection`
-类型的前台服务在运行，且授权结果必须在用户同意的会话内用掉。因此流程是
-启动前台服务 → 弹系统授权框 → 授权后立刻建投影开录。
+**为什么 macOS 用 CGWindowListCreateImage**：它是唯一无需 ScreenCaptureKit
+复杂管线的同步抓帧 API（自 10.15 起标记 deprecated 但仍可用）；
+SCK 窗口捕获需要 weak-link 与单独的音频管线，待后续版本。
 
 ### 落盘与元数据（设计文档 1.7）
 
@@ -187,20 +190,27 @@ pypdf    → 第 1 页 34 条注释，其中 Ink 2 条
 
 - 图书馆内的书 → `MyLibrary/books/{书名}/recordings/`（随图书馆同步，
   `position_at_start` 记录录制时的阅读位置，回看到书里的相关段落）
+- 笔记 → `MyLibrary/recordings/`（`book_id = notebook:{id}`）
 - 独立模式 → 应用文档目录 `recordings/`
 
-录课页下方是**录制记录**列表：时长 / 大小 / 文件名，可回放（`video_player`）
-与删除（视频 + 元数据一起删）。
+「录制记录」面板：时长 / 大小 / 文件名，可回放（`video_player`）与删除
+（视频 + 元数据一起删）。
 
 ## 笔记本（GoodNotes / Notability 风格手写笔记）
 
-导航栏「笔记」进入。一本笔记本一个 JSON 文件（`MyLibrary/notebooks/{id}.notebook.json`，
-未配图书馆时存应用文档目录），笔迹与阅读器批注共用同一套矢量结构
+导航栏「笔记」进入。一本笔记本一个 JSON 文件（默认
+`MyLibrary/notebooks/{id}.notebook.json`，未配图书馆时存应用文档目录），
+笔迹与阅读器批注共用同一套矢量结构
 （`InkStroke`：点 + 压力 + 时间戳），页面坐标为 A4 @150dpi（1240 × 1754）。
+
+**存储位置随图书馆走**：笔记本文件夹是 MyLibrary 下的一个**可配置子文件夹**
+（默认 `notebooks/`），在「笔记」页右上角 📁 里改（存 `MyLibrary/settings.json`，
+App 本地文件、不进数据契约）—— 配置了图书馆就跟着一起同步到网盘。
 
 **功能清单**：
 
 - 笔记本图书馆：彩色封面卡片、新建（标题 / 封面色 / 纸张模板）、重命名、删除
+- **录课子功能**：见上方「录课」—— 只录笔记页面，开始时自动复位缩放
 - 纸张模板：空白 / 横线（带红色页边线）/ 方格 / 点阵（按页可换）
 - 笔：钢笔 / 记号笔 / 荧光笔（multiply 混合，底下文字透出来）/ **笔画橡皮**
 - 6 色调色板 + 3 档粗细；压感来自硬件（Apple Pencil / 触控笔）
@@ -309,7 +319,7 @@ A problem occurred configuring project ':epub_viewer'.
 
 ```
 flutter analyze   → No issues found!
-flutter test      → 147 个测试全部通过
+flutter test      → 155 个测试全部通过
 ```
 
 测试覆盖：

@@ -20,12 +20,17 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
+import '../../library/library_page.dart';
 import '../annotation/ink_canvas.dart';
 import '../annotation/pdf_ink.dart' show paintLocalStrokes;
+import '../recorder/recording_panel.dart';
 import 'notebook_store.dart';
 
 /// 工具。
@@ -37,7 +42,7 @@ const List<double> kWidthScales = [0.6, 1.0, 1.8];
 /// 擦除半径（笔记页坐标单位）。
 const double _eraserRadius = 14;
 
-class NotebookEditorPage extends StatefulWidget {
+class NotebookEditorPage extends ConsumerStatefulWidget {
   const NotebookEditorPage({
     required this.notebook,
     required this.store,
@@ -52,12 +57,17 @@ class NotebookEditorPage extends StatefulWidget {
   final void Function(Notebook notebook) onSaved;
 
   @override
-  State<NotebookEditorPage> createState() => _NotebookEditorPageState();
+  ConsumerState<NotebookEditorPage> createState() => _NotebookEditorPageState();
 }
 
-class _NotebookEditorPageState extends State<NotebookEditorPage> {
+class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   late NotebookSession _session;
   final TransformationController _transform = TransformationController();
+
+  /// 被录的内容（当前笔记页画布）。
+  final GlobalKey _pageKey = GlobalKey();
+
+  bool _recordingMode = false;
 
   /// 视口（Transform 的父级坐标空间），滚轮缩放锚点换算用。
   final GlobalKey _viewportKey = GlobalKey();
@@ -185,6 +195,22 @@ class _NotebookEditorPageState extends State<NotebookEditorPage> {
     _transform.value = Matrix4.identity()..scaleByDouble(_fitScale, _fitScale, 1, 1);
   }
 
+  /// 笔记录像落点：图书馆内 → `MyLibrary/recordings/`（随图书馆同步）；
+  /// 独立笔记本 → 应用文档 recordings/。归属 id：`notebook:{id}`。
+  RecordingTarget _notebookRecordingTarget() {
+    final root = ref.watch(libraryRootProvider);
+    return RecordingTarget(
+      scopeLabel: '笔记',
+      resolveDir: () async {
+        if (root != null && root.isNotEmpty) return p.join(root, 'recordings');
+        return standaloneRecordingsDir();
+      },
+      ownerId: 'notebook:${_session.notebook.id}',
+      ownerTitle: _session.notebook.title,
+      audioSupported: !Platform.isWindows,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final notebook = _session.notebook;
@@ -223,6 +249,12 @@ class _NotebookEditorPageState extends State<NotebookEditorPage> {
               _session.notebook.pages[_session.currentPage].template,
             ),
           ),
+          // 录课子功能（设计文档 3.5）：开始时自动复位缩放，整页入镜
+          IconButton(
+            tooltip: _recordingMode ? '退出录制' : '录制讲解（仅录笔记页）',
+            icon: Icon(_recordingMode ? Icons.videocam_off : Icons.videocam_outlined),
+            onPressed: () => setState(() => _recordingMode = !_recordingMode),
+          ),
           IconButton(
             tooltip: '删除本页',
             icon: const Icon(Icons.delete_outline),
@@ -255,6 +287,7 @@ class _NotebookEditorPageState extends State<NotebookEditorPage> {
                         transform: _transform.value,
                         child: Center(
                           child: SizedBox(
+                            key: _pageKey,
                             width: notebook.pageWidth,
                             height: notebook.pageHeight,
                             child: _NotebookPageView(
@@ -290,7 +323,13 @@ class _NotebookEditorPageState extends State<NotebookEditorPage> {
           );
         },
       ),
-      bottomNavigationBar: SafeArea(
+      bottomNavigationBar: _recordingMode
+          ? RecordingPanel(
+              target: _notebookRecordingTarget(),
+              contentKey: _pageKey,
+              onBeforeStart: () async => _resetZoom(),
+            )
+          : SafeArea(
         child: _EditorToolbar(
           tool: _tool,
           color: _color,
