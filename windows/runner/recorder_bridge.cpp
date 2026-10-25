@@ -145,7 +145,7 @@ void RecorderBridge::HandleMethodCall(
     } else {
       result->Error("START_FAILED", error, nullptr);
     }
-  } else if (call.method_name().compare("stopRecording") == 0) {
+    } else if (call.method_name().compare("stopRecording") == 0) {
     int64_t seconds = 0;
     const std::string error = StopRecording(&seconds);
     if (error.empty()) {
@@ -153,8 +153,7 @@ void RecorderBridge::HandleMethodCall(
       response[flutter::EncodableValue("path")] = flutter::EncodableValue(output_path_);
       response[flutter::EncodableValue("duration_seconds")] =
           flutter::EncodableValue(static_cast<int32_t>(seconds));
-      flutter::EncodableValue value(std::move(response));
-      result->Success(&value);
+      result->Success(flutter::EncodableValue(std::move(response)));
     } else {
       result->Error("STOP_FAILED", error, nullptr);
     }

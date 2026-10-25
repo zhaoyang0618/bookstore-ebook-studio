@@ -5,7 +5,7 @@
 ///   `macos/Runner/ScreenRecorderBridge.swift`）
 /// - iOS：**仅录本应用窗口** —— `drawHierarchy` 逐帧渲染自己的视图树 +
 ///   `AVAssetWriter`，不需要屏幕录制权限（见 `ios/Runner/ReplayKitBridge.swift`）
-/// - Android：**仅 Android 15+**，MediaProjection `MIRROR_MODE_APP_ONLY`
+/// - Android：**仅 Android 14+**，MediaProjection `MIRROR_MODE_APP_ONLY`
 ///   只镜像本应用窗口 + MediaRecorder（见 `MediaProjectionBridge.kt`）
 /// - Windows：**仅录本应用窗口** —— `PrintWindow` 逐帧抓取 +
 ///   Media Foundation 编码 H.264（见 `windows/runner/recorder_bridge.cpp`；
@@ -139,10 +139,10 @@ class _RecordPageState extends ConsumerState<RecordPage> {
   String? _unsupportedReason() {
     if (Platform.isLinux) return 'Linux 端录制尚未实现（规划：PipeWire）';
     if (Platform.isAndroid) {
-      // 只做 Android 15+：MIRROR_MODE_APP_ONLY 才能只录本应用窗口
+      // 只做 Android 14+：MIRROR_MODE_APP_ONLY 才能只录本应用窗口
       final match = RegExp(r'Android (\d+)').firstMatch(Platform.operatingSystemVersion);
       final sdk = match != null ? int.tryParse(match.group(1)!) : null;
-      if (sdk != null && sdk < 15) return '录制需要 Android 15 及以上（用于只录本应用窗口）';
+      if (sdk != null && sdk < 14) return '录制需要 Android 14 及以上（用于只录本应用窗口）';
     }
     return null;
   }

@@ -32,7 +32,9 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.util.DisplayMetrics
 import android.view.WindowManager
+import android.view.WindowMetrics
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
@@ -117,12 +119,12 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     /**
      * 先起前台服务（Android 14 要求在 getMediaProjection 之前），再弹系统授权框。
      *
-     * 只支持 Android 15+：用 MIRROR_MODE_APP_ONLY 只镜像本应用窗口；
+     * 只支持 Android 14+：MIRROR_MODE_APP_ONLY（API 34）才能只镜像本应用窗口；
      * 更低版本直接报错（Dart 侧会提前拦截并说明）。
      */
     private fun launchConsent() {
-        if (Build.VERSION.SDK_INT < 35) {
-            finishStartWithError("REQUIRES_ANDROID_15", "录制仅支持 Android 15 及以上（只录本应用窗口）")
+        if (Build.VERSION.SDK_INT < 34) {
+            finishStartWithError("REQUIRES_ANDROID_14", "录制仅支持 Android 14 及以上（只录本应用窗口）")
             return
         }
         RecordingForegroundService.start(activity)
@@ -181,14 +183,22 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     private class ScreenSize(val width: Int, val height: Int, val densityDpi: Int)
 
     private fun screenSize(): ScreenSize {
-        // 只支持 Android 15+（MIRROR_MODE_APP_ONLY）→ 虚拟屏尺寸取**当前窗口**
+        // 只支持 Android 14+（MIRROR_MODE_APP_ONLY）→ 虚拟屏尺寸取**当前窗口**
         // 而非整块屏幕；仅保证宽高为偶数（编码器要求）
         val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val bounds = wm.currentWindowMetrics.bounds
         val dm = activity.resources.displayMetrics
-        val w = bounds.width() - (bounds.width() % 2)
-        val h = bounds.height() - (bounds.height() % 2)
-        return ScreenSize(w, h, dm.densityDpi)
+        return if (Build.VERSION.SDK_INT >= 30) {
+            val bounds = wm.currentWindowMetrics.bounds
+            val w = bounds.width() - (bounds.width() % 2)
+            val h = bounds.height() - (bounds.height() % 2)
+            ScreenSize(w, h, dm.densityDpi)
+        } else {
+            @Suppress("DEPRECATION")
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            activity.windowManager.defaultDisplay.getRealMetrics(metrics)
+            ScreenSize(metrics.widthPixels, metrics.heightPixels, dm.densityDpi)
+        }
     }
 
     private fun timestampFileName(): String {

@@ -329,9 +329,8 @@ public class ReplayKitBridge: NSObject, FlutterPlugin {
         writer = nil
         videoInput = nil
         adaptor = nil
-        if let pool = pixelPool {
-            CVPixelBufferPoolRelease(pool)
-        }
+        // CVPixelBufferPool 是 Core Foundation 桥接对象，Swift/ARC 自动管理，
+        // 不能（也不需要）手动 Release
         pixelPool = nil
         displayLink?.invalidate()
         displayLink = nil
