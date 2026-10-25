@@ -79,6 +79,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
 
   /// 视口尺寸与「宽度铺满」的缩放比（由 LayoutBuilder 算出）。
   Size _viewportSize = Size.zero;
+  Size _lastViewportSize = Size.zero;
   double _fitScale = 1;
 
   /// 首帧后设置初始缩放（build 期间改 controller 会触发
@@ -171,10 +172,63 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   Matrix4 _fitWidthMatrix() =>
       Matrix4.identity()..scaleByDouble(_fitScale, _fitScale, 1, 1);
 
-  /// 视口内平移（滚轮 / 触控板）。
+  /// 视口内平移（滚轮 / 触控板），随后钳制边界。
   void _panBy(Offset delta) {
     final ops = Matrix4.identity()..translateByDouble(-delta.dx, -delta.dy, 0, 1);
     ops.multiply(_transform.value);
+    _transform.value = ops;
+    _clampPan();
+  }
+
+  /// 平移边界钳制：放大到能覆盖视口时，纸**不允许被拖出视野**
+  /// （任何位置都能落笔）；缩得比视口还小时，保持纸完整可见。
+  ///
+  /// 没有这个钳制，页面可以被拖到角落 —— 露出的背景上落笔没有反应，
+  /// 看起来就像「底部不能画线」。
+  void _clampPan() {
+    if (_viewportSize.isEmpty) return;
+    final m = _transform.value;
+    final scale = m.getMaxScaleOnAxis();
+    if (scale <= 0) return;
+    final origin = MatrixUtils.transformPoint(m, Offset.zero);
+    final contentW = _session.notebook.pageWidth * scale;
+    final contentH = _session.notebook.pageHeight * scale;
+    final vw = _viewportSize.width;
+    final vh = _viewportSize.height;
+
+    double dx = 0;
+    if (contentW >= vw) {
+      // 纸比视口宽：左边缘不能进来，右边缘不能露出去
+      if (origin.dx > 0) {
+        dx = -origin.dx;
+      } else if (origin.dx + contentW < vw) {
+        dx = vw - contentW - origin.dx;
+      }
+    } else {
+      // 纸比视口窄：整体保持在视口内
+      if (origin.dx < 0) {
+        dx = -origin.dx;
+      } else if (origin.dx + contentW > vw) {
+        dx = vw - contentW - origin.dx;
+      }
+    }
+    double dy = 0;
+    if (contentH >= vh) {
+      if (origin.dy > 0) {
+        dy = -origin.dy;
+      } else if (origin.dy + contentH < vh) {
+        dy = vh - contentH - origin.dy;
+      }
+    } else {
+      if (origin.dy < 0) {
+        dy = -origin.dy;
+      } else if (origin.dy + contentH > vh) {
+        dy = vh - contentH - origin.dy;
+      }
+    }
+    if (dx == 0 && dy == 0) return;
+    final ops = Matrix4.identity()..translateByDouble(dx, dy, 0, 1);
+    ops.multiply(m);
     _transform.value = ops;
   }
 
@@ -206,6 +260,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
       ..translateByDouble(-center.dx, -center.dy, 0, 1);
     ops.multiply(_transform.value);
     _transform.value = ops;
+    _clampPan();
   }
 
   void _resetZoom() {
@@ -289,6 +344,12 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
             _needsInitialFit = false;
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (mounted) _transform.value = _fitWidthMatrix();
+            });
+          } else if (_lastViewportSize != _viewportSize) {
+            // 窗口缩放后页面可能跑到视野外，钳一次
+            _lastViewportSize = _viewportSize;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _clampPan();
             });
           }
           return ClipRect(
@@ -528,11 +589,8 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     if (_gestureSpan! <= 0 || span <= 0) return;
     final ratio = (span / _gestureSpan!).clamp(0.5, 2.0);
     widget.onZoom(_gestureMid!, ratio);
-    // 中点移动的平移量
-    final delta = mid - _gestureMid!;
-    final ops = Matrix4.identity()..translateByDouble(delta.dx, delta.dy, 0, 1);
-    ops.multiply(widget.transform.value);
-    widget.transform.value = ops;
+    // 中点移动的平移量（走 onPan，带边界钳制）
+    widget.onPan(mid - _gestureMid!);
     _gestureMid = mid;
     _gestureSpan = span;
   }
@@ -569,11 +627,10 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
         _panZoomScale = 1;
       },
       onPointerPanZoomUpdate: (event) {
-        final mid = _gestureMid ?? event.position;
-        final ops = Matrix4.identity()..translateByDouble(event.panDelta.dx, event.panDelta.dy, 0, 1);
-        ops.multiply(widget.transform.value);
-        widget.transform.value = ops;
-        _gestureMid = mid;
+        _gestureMid = _gestureMid ?? event.position;
+        if (event.panDelta != Offset.zero) {
+          widget.onPan(event.panDelta);
+        }
         // event.scale 是手势开始以来的累计缩放，换算成这一帧的比率
         if (event.scale > 0 && _panZoomScale > 0 && event.scale != _panZoomScale) {
           widget.onZoom(event.position, event.scale / _panZoomScale);
