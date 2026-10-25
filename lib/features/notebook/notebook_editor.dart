@@ -4,7 +4,8 @@
 ///
 /// - 单指 / 鼠标：书写（笔 / 记号笔 / 荧光笔）或擦除（笔画擦）
 /// - 双指：平移 + 缩放（第一笔会被取消，符合「两指=手势」直觉）
-/// - 滚轮：以光标为中心缩放（桌面端）
+/// - 滚轮：平移；Ctrl / ⌘ + 滚轮以光标为中心缩放（桌面端）
+/// - 缩放下限是「铺满窗口」：纸永远不会小于视口，任何位置都能落笔
 /// - 工具栏：缩放按钮 / 翻页 / 加删页 / 纸张模板
 ///
 /// ## 实现
@@ -21,6 +22,7 @@ library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -77,10 +79,21 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   Color _color = const Color(0xFF212121);
   double _widthScale = 1.0;
 
-  /// 视口尺寸与「宽度铺满」的缩放比（由 LayoutBuilder 算出）。
+  /// 视口尺寸（由 LayoutBuilder 算出）。
   Size _viewportSize = Size.zero;
   Size _lastViewportSize = Size.zero;
-  double _fitScale = 1;
+
+  /// 缩放下限：纸**恰好盖住视口**的缩放比（宽/高两个方向取大的）。
+  ///
+  /// 不允许缩得比这更小 —— 纸一旦小于窗口，四周露出背景，
+  /// 背景上落笔没反应，看起来就是「某处不能画」。
+  double get _coverScale {
+    if (_viewportSize.isEmpty || _session.notebook.pageWidth <= 0) return 1;
+    return max(
+      _viewportSize.width / _session.notebook.pageWidth,
+      _viewportSize.height / _session.notebook.pageHeight,
+    );
+  }
 
   /// 首帧后设置初始缩放（build 期间改 controller 会触发
   /// 「build 期间 markNeedsBuild」异常，必须推迟到帧后）。
@@ -168,9 +181,20 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     _session.deletePage(_session.currentPage);
   }
 
-  /// 宽度铺满、页面顶到视口左上的矩阵（初始 / 复位状态）。
-  Matrix4 _fitWidthMatrix() =>
-      Matrix4.identity()..scaleByDouble(_fitScale, _fitScale, 1, 1);
+  /// 「铺满」矩阵（初始 / 复位状态）：用 [_coverScale]，
+  /// 没铺到的那根轴上让纸居中。
+  Matrix4 _coverMatrix() {
+    final scale = _coverScale;
+    final m = Matrix4.identity()..scaleByDouble(scale, scale, 1, 1);
+    final dx = max(
+        0.0, (_viewportSize.width - _session.notebook.pageWidth * scale) / 2);
+    final dy = max(
+        0.0, (_viewportSize.height - _session.notebook.pageHeight * scale) / 2);
+    if (dx > 0 || dy > 0) {
+      m.translateByDouble(dx, dy, 0, 1);
+    }
+    return m;
+  }
 
   /// 视口内平移（滚轮 / 触控板），随后钳制边界。
   void _panBy(Offset delta) {
@@ -190,6 +214,11 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     final m = _transform.value;
     final scale = m.getMaxScaleOnAxis();
     if (scale <= 0) return;
+    // 缩放低于「铺满」下限 → 恢复到铺满（兜底：所有缩放入口都有自己的下限）
+    if (scale < _coverScale - 0.0001) {
+      _transform.value = _coverMatrix();
+      return;
+    }
     final origin = MatrixUtils.transformPoint(m, Offset.zero);
     final contentW = _session.notebook.pageWidth * scale;
     final contentH = _session.notebook.pageHeight * scale;
@@ -251,7 +280,8 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
 
   void _zoomAbout(Offset center, double ratio) {
     final current = _transform.value.getMaxScaleOnAxis();
-    final target = (current * ratio).clamp(0.1, 10.0);
+    final floor = _viewportSize.isEmpty ? 0.1 : _coverScale;
+    final target = (current * ratio).clamp(floor, 10.0);
     final effective = target / current;
     if (effective == 1) return;
     final ops = Matrix4.identity()
@@ -264,7 +294,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   }
 
   void _resetZoom() {
-    _transform.value = _fitWidthMatrix();
+    _transform.value = _coverMatrix();
   }
 
   /// 笔记录像落点：图书馆内 → `MyLibrary/recordings/`（随图书馆同步）；
@@ -339,11 +369,10 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
           _viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
           // 初始缩放：**宽度铺满**（GoodNotes 行为）—— 页面横向占满窗口，
           // 纵向超出部分用双指 / 滚轮平移；不再缩成一角让人找不到纸在哪
-          _fitScale = _viewportSize.width / notebook.pageWidth;
           if (_needsInitialFit) {
             _needsInitialFit = false;
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _transform.value = _fitWidthMatrix();
+              if (mounted) _transform.value = _coverMatrix();
             });
           } else if (_lastViewportSize != _viewportSize) {
             // 窗口缩放后页面可能跑到视野外，钳一次
