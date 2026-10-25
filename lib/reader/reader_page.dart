@@ -19,6 +19,7 @@ import '../features/annotation/annotation_panel.dart';
 import '../features/recorder/recording_catalog.dart' show recordingsDirOf;
 import '../features/recorder/recording_panel.dart';
 import '../library/library_page.dart';
+import '../ui/fullscreen.dart';
 import '../models/mylibrary_models.dart';
 import '../storage/my_library_store.dart';
 
@@ -512,6 +513,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> {
               icon: const Icon(Icons.picture_as_pdf_outlined),
               onPressed: _exportInkToPdf,
             ),
+          const FullscreenAppBarButton(),
         ],
       ),
       body: Column(

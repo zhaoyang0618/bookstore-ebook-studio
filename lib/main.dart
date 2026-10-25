@@ -1,10 +1,14 @@
 /// ebook_studio 入口（设计文档 3.7 目录结构中的 lib/main.dart）。
 library;
 
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'app.dart';
 import 'pdf/pdf_ink_export.dart';
@@ -12,6 +16,11 @@ import 'storage/notes_location.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 桌面端初始化窗口管理（全屏切换用，见 lib/ui/fullscreen.dart）
+  if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+    await windowManager.ensureInitialized();
+  }
 
   // 配置批注边车的「退回目录」。
   //

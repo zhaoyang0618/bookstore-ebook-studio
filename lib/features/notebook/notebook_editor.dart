@@ -24,6 +24,7 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
@@ -76,7 +77,8 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   Color _color = const Color(0xFF212121);
   double _widthScale = 1.0;
 
-  /// 视口能容纳整页的比例（由 LayoutBuilder 算出）。
+  /// 视口尺寸与「宽度铺满」的缩放比（由 LayoutBuilder 算出）。
+  Size _viewportSize = Size.zero;
   double _fitScale = 1;
 
   /// 首帧后设置初始缩放（build 期间改 controller 会触发
@@ -165,9 +167,24 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     _session.deletePage(_session.currentPage);
   }
 
+  /// 宽度铺满、页面顶到视口左上的矩阵（初始 / 复位状态）。
+  Matrix4 _fitWidthMatrix() =>
+      Matrix4.identity()..scaleByDouble(_fitScale, _fitScale, 1, 1);
+
+  /// 视口内平移（滚轮 / 触控板）。
+  void _panBy(Offset delta) {
+    final ops = Matrix4.identity()..translateByDouble(-delta.dx, -delta.dy, 0, 1);
+    ops.multiply(_transform.value);
+    _transform.value = ops;
+  }
+
   void _setZoom(double ratio) {
-    final size = MediaQuery.sizeOf(context);
-    _zoomAbout(Offset(size.width / 2, size.height / 2), ratio);
+    var center = _viewportSize.center(Offset.zero);
+    if (center == Offset.zero) {
+      final size = MediaQuery.sizeOf(context);
+      center = Offset(size.width / 2, size.height / 2);
+    }
+    _zoomAbout(center, ratio);
   }
 
   /// 以**全局坐标**的 [globalCenter] 为锚点缩放（滚轮 / 触控板事件给的是
@@ -192,7 +209,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
   }
 
   void _resetZoom() {
-    _transform.value = Matrix4.identity()..scaleByDouble(_fitScale, _fitScale, 1, 1);
+    _transform.value = _fitWidthMatrix();
   }
 
   /// 笔记录像落点：图书馆内 → `MyLibrary/recordings/`（随图书馆同步）；
@@ -264,15 +281,14 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
       ),
       body: LayoutBuilder(
         builder: (context, constraints) {
-          final fit = (constraints.maxWidth / notebook.pageWidth)
-              .clamp(0.01, (constraints.maxHeight / notebook.pageHeight).toDouble()) * 0.96;
-          _fitScale = fit;
+          _viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
+          // 初始缩放：**宽度铺满**（GoodNotes 行为）—— 页面横向占满窗口，
+          // 纵向超出部分用双指 / 滚轮平移；不再缩成一角让人找不到纸在哪
+          _fitScale = _viewportSize.width / notebook.pageWidth;
           if (_needsInitialFit) {
             _needsInitialFit = false;
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) {
-                _transform.value = Matrix4.identity()..scaleByDouble(_fitScale, _fitScale, 1, 1);
-              }
+              if (mounted) _transform.value = _fitWidthMatrix();
             });
           }
           return ClipRect(
@@ -285,7 +301,12 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
                     builder: (context, _) {
                       return Transform(
                         transform: _transform.value,
-                        child: Center(
+                        // 页面按原始尺寸放在视口左上（OverflowBox 放开约束），
+                        // 所有矩阵运算都在视口坐标系里进行
+                        child: OverflowBox(
+                          alignment: Alignment.topLeft,
+                          maxWidth: double.infinity,
+                          maxHeight: double.infinity,
                           child: SizedBox(
                             key: _pageKey,
                             width: notebook.pageWidth,
@@ -297,8 +318,8 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
                               color: _color,
                               widthScale: _widthScale,
                               transform: _transform,
-                              fitScale: _fitScale,
                               onZoom: _zoomAboutGlobal,
+                              onPan: _panBy,
                             ),
                           ),
                         ),
@@ -367,8 +388,8 @@ class _NotebookPageView extends StatefulWidget {
     required this.color,
     required this.widthScale,
     required this.transform,
-    required this.fitScale,
     required this.onZoom,
+    required this.onPan,
   });
 
   final NotebookSession session;
@@ -377,8 +398,10 @@ class _NotebookPageView extends StatefulWidget {
   final Color color;
   final double widthScale;
   final TransformationController transform;
-  final double fitScale;
   final void Function(Offset center, double ratio) onZoom;
+
+  /// 滚轮 / 触控板滚动 → 视口内平移。
+  final void Function(Offset delta) onPan;
 
   @override
   State<_NotebookPageView> createState() => _NotebookPageViewState();
@@ -514,11 +537,18 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     _gestureSpan = span;
   }
 
-  /// 滚轮：以光标为中心缩放（桌面端）。
+  /// 滚轮：平移（纵向为主）；Ctrl / ⌘ + 滚轮以光标为中心缩放。
   void _onPointerSignal(PointerSignalEvent event) {
-    if (event is PointerScrollEvent && event.scrollDelta.dy != 0) {
-      final ratio = event.scrollDelta.dy > 0 ? 1 / 1.1 : 1.1;
-      widget.onZoom(event.position, ratio);
+    if (event is! PointerScrollEvent) return;
+    if (HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed) {
+      if (event.scrollDelta.dy != 0) {
+        final ratio = event.scrollDelta.dy > 0 ? 1 / 1.1 : 1.1;
+        widget.onZoom(event.position, ratio);
+      }
+      return;
+    }
+    if (event.scrollDelta != Offset.zero) {
+      widget.onPan(event.scrollDelta);
     }
   }
 
@@ -581,6 +611,8 @@ class _PageStrokesPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // 页面坐标 == 局部坐标；笔迹裁剪在纸面内（画出纸外的部分不可见）
+    canvas.clipRect(Offset.zero & size);
     // 页面坐标 == 局部坐标，displayedSize == pageSize
     paintLocalStrokes(canvas, strokes);
     final draft = current;
@@ -613,6 +645,15 @@ class _NotebookPaperPainter extends CustomPainter {
       ..color = _line
       ..strokeWidth = 1;
     final dot = Paint()..color = _dot;
+
+    // 纸张边界：细灰框，让页面在背景上一眼可辨
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()
+        ..color = const Color(0x33000000)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
 
     switch (template) {
       case NotebookTemplate.blank:

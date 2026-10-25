@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/mylibrary_models.dart';
 import '../routes.dart';
 import '../storage/my_library_store.dart';
+import '../ui/fullscreen.dart';
 import 'dangling_card.dart';
 
 /// MyLibrary 根目录（默认放在应用文档目录下）。
@@ -102,6 +103,7 @@ class LibraryPage extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('我的图书馆'),
         actions: [
+          const FullscreenAppBarButton(),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: Center(child: Text('v${library.version} · ${library.books.length} 本', style: Theme.of(context).textTheme.bodySmall)),
@@ -153,7 +155,7 @@ class _EmptyLibrary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('我的图书馆')),
+      appBar: AppBar(title: const Text('我的图书馆'), actions: const [FullscreenAppBarButton()]),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,

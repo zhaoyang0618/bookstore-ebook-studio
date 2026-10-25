@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../library/library_page.dart';
 import '../../storage/my_library_store.dart';
+import '../../ui/fullscreen.dart';
 import 'notebook_editor.dart';
 import 'notebook_store.dart';
 
@@ -208,6 +209,7 @@ class _NotesPageState extends ConsumerState<NotesPage> {
             icon: const Icon(Icons.note_add),
             onPressed: _createNotebook,
           ),
+          const FullscreenAppBarButton(),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(

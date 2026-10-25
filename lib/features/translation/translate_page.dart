@@ -10,6 +10,7 @@ import 'dart:io' show HttpException;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
+import '../../ui/fullscreen.dart';
 
 /// 翻译服务配置。
 class TranslateConfig {
@@ -98,7 +99,7 @@ class TranslatePage extends ConsumerWidget {
     final controller = TextEditingController();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('翻译')),
+      appBar: AppBar(title: const Text('翻译'), actions: const [FullscreenAppBarButton()]),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
