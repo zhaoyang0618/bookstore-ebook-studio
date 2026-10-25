@@ -213,6 +213,51 @@ void main() {
       expect(session.currentPage, 1);
     });
 
+    test('插入新页后，各页笔迹互不串页（回归：笔迹按 pageId 存储）', () {
+      final session = NotebookSession(store.create(title: 's', coverColor: 0));
+      final pageA = hLine(0, 10, 100);
+      session.addStroke(0, pageA);
+
+      session.insertPageAfterCurrent(NotebookTemplate.blank); // 当前切到新页（index 1）
+      session.addStroke(1, hLine(0, 50, 100));
+
+      // 第 1 页只有原来的笔，第 2 页只有新笔
+      expect(session.strokesOf(0), [pageA]);
+      expect(session.strokesOf(1), hasLength(1));
+
+      // 回到第 1 页继续画，再翻到第 2 页，互不影响
+      session.currentPage = 0;
+      session.addStroke(0, hLine(0, 20, 30));
+      expect(session.strokesOf(0), hasLength(2));
+      expect(session.strokesOf(1), hasLength(1));
+
+      final snapshot = session.snapshot();
+      expect(snapshot.pages[0].strokes, hasLength(2));
+      expect(snapshot.pages[1].strokes, hasLength(1));
+    });
+
+    test('删除中间页后，其余页的笔迹保持原样', () {
+      final session = NotebookSession(store.create(title: 's', coverColor: 0));
+      final strokesA = hLine(0, 10, 100);
+      final strokesB = hLine(0, 50, 100);
+      final strokesC = hLine(0, 90, 100);
+      session.addStroke(0, strokesA);
+      session.insertPageAfterCurrent(NotebookTemplate.blank); // page B（index 1）
+      session.addStroke(1, strokesB);
+      session.insertPageAfterCurrent(NotebookTemplate.blank); // page C（index 2）
+      session.addStroke(2, strokesC);
+
+      session.deletePage(1); // 删 B
+
+      expect(session.pageCount, 2);
+      expect(session.strokesOf(0), [strokesA]);
+      expect(session.strokesOf(1), [strokesC], reason: 'C 的笔迹不能被 B 的顶替');
+
+      final snapshot = session.snapshot();
+      expect(snapshot.pages[0].strokes, hasLength(1));
+      expect(snapshot.pages[1].strokes, hasLength(1));
+    });
+
     test('最后一页不能删', () {
       final session = NotebookSession(store.create(title: 's', coverColor: 0));
       session.deletePage(0);

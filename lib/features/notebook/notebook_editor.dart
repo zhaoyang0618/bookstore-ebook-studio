@@ -37,7 +37,10 @@ import '../recorder/recording_panel.dart';
 import 'notebook_store.dart';
 
 /// 工具。
-enum NotebookTool { pen, marker, highlighter, eraser }
+///
+/// [pan] 是「移动」模式：拖动 = 平移画布，不能画线
+/// （桌面鼠标没有双指手势，靠它移动页面）。
+enum NotebookTool { pen, marker, highlighter, eraser, pan }
 
 /// 笔画粗细档位（乘在工具默认线宽上）。
 const List<double> kWidthScales = [0.6, 1.0, 1.8];
@@ -514,7 +517,13 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   /// 是否处于一段连续的擦除拖动中（合并撤销记录）。
   bool _erasing = false;
 
+  /// 移动模式：正在拖画布的指针。
+  int? _panPointer;
+  Offset? _lastPanPosition;
+
   bool get _isEraser => widget.tool == NotebookTool.eraser;
+
+  bool get _isPanTool => widget.tool == NotebookTool.pan;
 
   /// 工具的页面单位线宽（存储值，与缩放无关）。
   double get _strokeWidth {
@@ -523,6 +532,7 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       NotebookTool.marker => 5.0,
       NotebookTool.highlighter => 16.0,
       NotebookTool.eraser => 2.0,
+      NotebookTool.pan => 0.0, // 不画线，不会走到
     };
     return base * widget.widthScale;
   }
@@ -550,6 +560,13 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     }
     if (_pointers.length > 2 || _current != null) return;
 
+    // 移动模式：拖动 = 平移画布，不能画线
+    if (_isPanTool) {
+      _panPointer = event.pointer;
+      _lastPanPosition = event.position;
+      return;
+    }
+
     if (_isEraser) {
       _erasing = true;
       widget.session.eraseAt(widget.pageIndex, event.localPosition, _eraserRadius);
@@ -575,6 +592,12 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       _applyTwoFingerGesture();
       return;
     }
+    // 移动模式：单指 / 鼠标拖动平移画布
+    if (_panPointer == event.pointer && _lastPanPosition != null) {
+      widget.onPan(event.position - _lastPanPosition!);
+      _lastPanPosition = event.position;
+      return;
+    }
     final current = _current;
     if (current == null) {
       if (_isEraser && _pointers.isNotEmpty) {
@@ -595,6 +618,10 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
 
   void _onPointerUp(PointerEvent event) {
     _pointers.remove(event.pointer);
+    if (_panPointer == event.pointer) {
+      _panPointer = null;
+      _lastPanPosition = null;
+    }
     _erasing = false;
     if (_pointers.isEmpty) {
       _gestureMid = null;
@@ -852,6 +879,7 @@ class _EditorToolbar extends StatelessWidget {
               ButtonSegment(value: NotebookTool.marker, icon: Icon(Icons.brush, size: 18), tooltip: '记号笔'),
               ButtonSegment(value: NotebookTool.highlighter, icon: Icon(Icons.format_color_fill, size: 18), tooltip: '荧光笔'),
               ButtonSegment(value: NotebookTool.eraser, icon: Icon(Icons.cleaning_services, size: 18), tooltip: '橡皮（笔画擦除）'),
+              ButtonSegment(value: NotebookTool.pan, icon: Icon(Icons.pan_tool, size: 18), tooltip: '移动画布（此模式不能画线）'),
             ],
             selected: {tool},
             showSelectedIcon: false,

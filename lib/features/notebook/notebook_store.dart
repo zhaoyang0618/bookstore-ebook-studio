@@ -256,12 +256,15 @@ class NotebookStore {
 // ---------- 编辑会话（纯逻辑，可单测） ----------
 
 /// 一次可撤销的操作。
+///
+/// 用 **pageId** 而不是页码下标定位页面：加页 / 删页会让下标漂移
+/// （操作历史在页面结构变化时清空，但保险起见 id 永远是对的）。
 class NotebookOp {
-  NotebookOp.addStroke(this.pageIndex, this.added) : removed = const [];
+  NotebookOp.addStroke(this.pageId, this.added) : removed = const [];
 
-  NotebookOp.removeStrokes(this.pageIndex, this.removed) : added = const [];
+  NotebookOp.removeStrokes(this.pageId, this.removed) : added = const [];
 
-  final int pageIndex;
+  final String pageId;
 
   /// 新增的笔画（撤销时按身份移除）。
   final List<InkStroke> added;
@@ -280,7 +283,9 @@ class NotebookSession extends ChangeNotifier {
 
   Notebook notebook;
 
-  final Map<int, List<InkStroke>> _pageStrokes;
+  /// 笔迹按 **pageId** 存（不是下标！加页 / 删页时下标会漂移，
+  /// 按 id 存才能保证各页笔迹永不串页）。
+  final Map<String, List<InkStroke>> _pageStrokes;
 
   final List<NotebookOp> _undoStack = [];
   final List<NotebookOp> _redoStack = [];
@@ -288,10 +293,10 @@ class NotebookSession extends ChangeNotifier {
   /// 是否有未保存的修改。
   bool dirty = false;
 
-  static Map<int, List<InkStroke>> _fromNotebook(Notebook notebook) {
-    final map = <int, List<InkStroke>>{};
-    for (var i = 0; i < notebook.pages.length; i++) {
-      map[i] = notebook.pages[i].strokes.map(InkStroke.fromJson).toList();
+  static Map<String, List<InkStroke>> _fromNotebook(Notebook notebook) {
+    final map = <String, List<InkStroke>>{};
+    for (final page in notebook.pages) {
+      map[page.id] = page.strokes.map(InkStroke.fromJson).toList();
     }
     return map;
   }
@@ -307,12 +312,13 @@ class NotebookSession extends ChangeNotifier {
 
   /// 某页的笔画（只读快照）。
   List<InkStroke> strokesOf(int pageIndex) =>
-      List.unmodifiable(_pageStrokes[pageIndex] ?? const []);
+      List.unmodifiable(_strokes(_pageIdAt(pageIndex)));
 
   /// 追加一笔。
   void addStroke(int pageIndex, InkStroke stroke) {
-    _strokesAt(pageIndex).add(stroke);
-    _undoStack.add(NotebookOp.addStroke(pageIndex, [stroke]));
+    final pageId = _pageIdAt(pageIndex);
+    _strokes(pageId).add(stroke);
+    _undoStack.add(NotebookOp.addStroke(pageId, [stroke]));
     _redoStack.clear();
     _markDirty();
   }
@@ -323,7 +329,8 @@ class NotebookSession extends ChangeNotifier {
   /// 合并进上一条擦除记录 —— 整段拖动只算一次撤销。
   /// 返回擦掉的笔数。
   int eraseAt(int pageIndex, Offset point, double radius, {bool mergeWithLast = false}) {
-    final strokes = _strokesAt(pageIndex);
+    final pageId = _pageIdAt(pageIndex);
+    final strokes = _strokes(pageId);
     final hit = <({int index, InkStroke stroke})>[];
     for (var i = strokes.length - 1; i >= 0; i--) {
       if (strokeContainsPoint(strokes[i], point, radius)) {
@@ -335,14 +342,14 @@ class NotebookSession extends ChangeNotifier {
       strokes.removeAt(entry.index);
     }
     final last = mergeWithLast ? _undoStack.lastOrNull : null;
-    if (last != null && last.removed.isNotEmpty && last.pageIndex == pageIndex) {
+    if (last != null && last.removed.isNotEmpty && last.pageId == pageId) {
       // 合并进上一条擦除记录：本次下标是「已删掉一批之后」的列表里的，
       // 换算回本操作开始前的原始下标，撤销时才能按原顺序插回
       for (final entry in hit) {
         last.removed.add((index: _originalIndexOf(entry.index, last.removed), stroke: entry.stroke));
       }
     } else {
-      _undoStack.add(NotebookOp.removeStrokes(pageIndex, hit));
+      _undoStack.add(NotebookOp.removeStrokes(pageId, hit));
       _redoStack.clear();
     }
     _markDirty();
@@ -368,20 +375,21 @@ class NotebookSession extends ChangeNotifier {
 
   /// 清空一页。
   void clearPage(int pageIndex) {
-    final strokes = _strokesAt(pageIndex);
+    final pageId = _pageIdAt(pageIndex);
+    final strokes = _strokes(pageId);
     if (strokes.isEmpty) return;
     final removed = <({int index, InkStroke stroke})>[
       for (var i = strokes.length - 1; i >= 0; i--) (index: i, stroke: strokes[i]),
     ];
     strokes.clear();
-    _undoStack.add(NotebookOp.removeStrokes(pageIndex, removed));
+    _undoStack.add(NotebookOp.removeStrokes(pageId, removed));
     _redoStack.clear();
     _markDirty();
   }
 
   void undo() {
     final op = _undoStack.removeLast();
-    final strokes = _strokesAt(op.pageIndex);
+    final strokes = _strokes(op.pageId);
     for (final stroke in op.added) {
       strokes.removeWhere((existing) => identical(existing, stroke));
     }
@@ -396,7 +404,7 @@ class NotebookSession extends ChangeNotifier {
 
   void redo() {
     final op = _redoStack.removeLast();
-    final strokes = _strokesAt(op.pageIndex);
+    final strokes = _strokes(op.pageId);
     strokes.addAll(op.added);
     for (final entry in op.removed) {
       // 撤销把同实例原位插回过，按身份找到再删，不依赖下标
@@ -411,9 +419,8 @@ class NotebookSession extends ChangeNotifier {
   Notebook snapshot() {
     final now = DateTime.now().toUtc().toIso8601String();
     final pages = <NotebookPage>[];
-    for (var i = 0; i < notebook.pages.length; i++) {
-      final page = notebook.pages[i];
-      final strokes = _pageStrokes[i] ?? const <InkStroke>[];
+    for (final page in notebook.pages) {
+      final strokes = _pageStrokes[page.id] ?? const <InkStroke>[];
       pages.add(page.copyWith(
         strokes: strokes.map((stroke) => stroke.toJson()).toList(),
         updatedAt: now,
@@ -443,10 +450,12 @@ class NotebookSession extends ChangeNotifier {
   /// 删除一页（至少保留一页）。
   void deletePage(int pageIndex) {
     if (notebook.pages.length <= 1) return;
+    final removedId = notebook.pages[pageIndex].id;
     notebook = notebook.copyWith(
       pages: [...notebook.pages]..removeAt(pageIndex),
       updatedAt: DateTime.now().toUtc().toIso8601String(),
     );
+    _pageStrokes.remove(removedId);
     if (currentPage >= notebook.pages.length) currentPage = notebook.pages.length - 1;
     _clearHistoryAndMarkDirty();
   }
@@ -462,8 +471,10 @@ class NotebookSession extends ChangeNotifier {
 
   // ---------- 内部 ----------
 
-  List<InkStroke> _strokesAt(int pageIndex) =>
-      _pageStrokes.putIfAbsent(pageIndex, () => <InkStroke>[]);
+  String _pageIdAt(int pageIndex) => notebook.pages[pageIndex].id;
+
+  List<InkStroke> _strokes(String pageId) =>
+      _pageStrokes.putIfAbsent(pageId, () => <InkStroke>[]);
 
   void _clearHistoryAndMarkDirty() {
     _undoStack.clear();
