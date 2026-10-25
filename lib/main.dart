@@ -13,6 +13,7 @@ import 'package:window_manager/window_manager.dart';
 import 'app.dart';
 import 'pdf/pdf_ink_export.dart';
 import 'storage/notes_location.dart';
+import 'util/app_log.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,6 +34,7 @@ Future<void> main() async {
   // 权限，边车仍会写在书旁边 —— 由 notes_location 的可写性探测决定。
   try {
     final docs = await getApplicationDocumentsDirectory();
+    await AppLog.init();
     notesFallbackDir = p.join(docs.path, 'annotations');
     // 写回原生 PDF 注释前会先把原文件备份到这里
     pdfBackupDir = p.join(docs.path, 'pdf-backups');

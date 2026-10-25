@@ -31,6 +31,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../../library/library_page.dart';
+import '../../util/app_log.dart';
 import '../annotation/ink_canvas.dart';
 import '../annotation/pdf_ink.dart' show paintLocalStrokes;
 import '../recorder/recording_panel.dart';
@@ -47,6 +48,18 @@ const List<double> kWidthScales = [0.6, 1.0, 1.8];
 
 /// 擦除半径（笔记页坐标单位）。
 const double _eraserRadius = 14;
+
+String _fmt(Offset o) =>
+    '(${o.dx.toStringAsFixed(1)}, ${o.dy.toStringAsFixed(1)})';
+
+String _kindName(PointerDeviceKind kind) => switch (kind) {
+      PointerDeviceKind.mouse => 'mouse',
+      PointerDeviceKind.touch => 'touch',
+      PointerDeviceKind.stylus => 'stylus',
+      PointerDeviceKind.invertedStylus => 'invStylus',
+      PointerDeviceKind.trackpad => 'trackpad',
+      _ => kind.toString(),
+    };
 
 class NotebookEditorPage extends ConsumerStatefulWidget {
   const NotebookEditorPage({
@@ -144,6 +157,14 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     if (mounted) setState(() {});
   }
 
+  /// 诊断日志查看器：复现手势问题后把日志发给开发者。
+  Future<void> _showDiagnostics() async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => const _AppLogDialog(),
+    );
+  }
+
   Future<void> _rename() async {
     final controller = TextEditingController(text: _session.notebook.title);
     final title = await showDialog<String>(
@@ -205,6 +226,8 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     ops.multiply(_transform.value);
     _transform.value = ops;
     _clampPan();
+    final t = _transform.value.getTranslation();
+    AppLog.log('pan', 'by=${_fmt(delta)} -> translation=(${t.x.toStringAsFixed(1)}, ${t.y.toStringAsFixed(1)}) scale=${_transform.value.getMaxScaleOnAxis().toStringAsFixed(3)}');
   }
 
   /// 平移边界钳制：放大到能覆盖视口时，纸**不允许被拖出视野**
@@ -259,6 +282,8 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
       }
     }
     if (dx == 0 && dy == 0) return;
+    AppLog.log('clamp', 'adjusted dx=${dx.toStringAsFixed(1)} dy=${dy.toStringAsFixed(1)} '
+        '(content=${contentW.toStringAsFixed(0)}x${contentH.toStringAsFixed(0)} viewport=${vw.toStringAsFixed(0)}x${vh.toStringAsFixed(0)} origin=(${origin.dx.toStringAsFixed(1)}, ${origin.dy.toStringAsFixed(1)}))');
     final ops = Matrix4.identity()..translateByDouble(dx, dy, 0, 1);
     ops.multiply(m);
     _transform.value = ops;
@@ -286,6 +311,7 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
     final floor = _viewportSize.isEmpty ? 0.1 : _coverScale;
     final target = (current * ratio).clamp(floor, 10.0);
     final effective = target / current;
+    AppLog.log('zoom', 'about=${_fmt(center)} ratio=${ratio.toStringAsFixed(3)} current=${current.toStringAsFixed(3)} -> target=${target.toStringAsFixed(3)} floor=${floor.toStringAsFixed(3)}');
     if (effective == 1) return;
     final ops = Matrix4.identity()
       ..translateByDouble(center.dx, center.dy, 0, 1)
@@ -364,6 +390,11 @@ class _NotebookEditorPageState extends ConsumerState<NotebookEditorPage> {
             tooltip: '删除本页',
             icon: const Icon(Icons.delete_outline),
             onPressed: _session.pageCount > 1 ? _deletePage : null,
+          ),
+          IconButton(
+            tooltip: '诊断日志',
+            icon: const Icon(Icons.bug_report_outlined),
+            onPressed: _showDiagnostics,
           ),
         ],
       ),
@@ -543,10 +574,15 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    AppLog.log('ptr',
+        'DOWN kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} pressure=${event.pressure.toStringAsFixed(2)}');
     // 触控板「直接触摸」指针不参与任何交互（画线 / 双指逻辑都不进）：
     // macOS 双指滑动时而被路由成裸指针，参与画线就会误画。
     // 触控板只通过 PointerPanZoom / PointerScroll 事件平移缩放。
-    if (event.kind == PointerDeviceKind.trackpad) return;
+    if (event.kind == PointerDeviceKind.trackpad) {
+      AppLog.log('ptr', 'DOWN -> ignored (trackpad)');
+      return;
+    }
     _pointers[event.pointer] = event.position;
     // 第二根手指落下：取消正在画的笔（两指 = 平移/缩放手势）
     if (_pointers.length == 2 && _current != null) {
@@ -568,11 +604,13 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     if (_isPanTool) {
       _panPointer = event.pointer;
       _lastPanPosition = event.position;
+      AppLog.log('ptr', 'DOWN -> pan-drag start id=${event.pointer} at=${_fmt(event.position)}');
       return;
     }
 
     if (_isEraser) {
       _erasing = true;
+      AppLog.log('ptr', 'DOWN -> erase-drag start id=${event.pointer}');
       widget.session.eraseAt(widget.pageIndex, event.localPosition, _eraserRadius);
       return;
     }
@@ -585,21 +623,28 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
         InkPoint(x: event.localPosition.dx, y: event.localPosition.dy, t: 0),
       ],
     );
+    AppLog.log('ptr', 'DOWN -> stroke-start id=${event.pointer} at=${_fmt(event.localPosition)}');
     setState(() {});
   }
 
   void _onPointerMove(PointerMoveEvent event) {
-    if (event.kind == PointerDeviceKind.trackpad) return;
+    if (event.kind == PointerDeviceKind.trackpad) {
+      AppLog.log('ptr', 'MOVE kind=trackpad id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)} -> ignored');
+      return;
+    }
     if (_pointers.containsKey(event.pointer)) {
       _pointers[event.pointer] = event.position;
     }
     if (_pointers.length >= 2) {
+      AppLog.log('ptr', 'MOVE id=${event.pointer} pointers=${_pointers.length} -> two-finger gesture');
       _applyTwoFingerGesture();
       return;
     }
     // 移动模式：单指 / 鼠标拖动平移画布
     if (_panPointer == event.pointer && _lastPanPosition != null) {
-      widget.onPan(event.position - _lastPanPosition!);
+      final delta = event.position - _lastPanPosition!;
+      AppLog.log('ptr', 'MOVE id=${event.pointer} -> pan-drag delta=${_fmt(delta)}');
+      widget.onPan(delta);
       _lastPanPosition = event.position;
       return;
     }
@@ -608,6 +653,8 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       if (_isEraser && _pointers.isNotEmpty) {
         // 橡皮拖动持续擦；整段拖动合并为一次撤销
         widget.session.eraseAt(widget.pageIndex, event.localPosition, _eraserRadius, mergeWithLast: _erasing);
+      } else {
+        AppLog.log('ptr', 'MOVE id=${event.pointer} no-current (dropped) local=${_fmt(event.localPosition)}');
       }
       return;
     }
@@ -618,12 +665,19 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       pressure: event.pressure > 0 ? event.pressure.clamp(0.0, 1.0) : 1,
       t: elapsed,
     ));
+    if (current.points.length % 20 == 0) {
+      AppLog.log('ptr', 'MOVE stroke id=${event.pointer} pts=${current.points.length} last=${_fmt(event.localPosition)}');
+    }
     setState(() {});
   }
 
   void _onPointerUp(PointerEvent event) {
+    AppLog.log('ptr', 'UP kind=${_kindName(event.kind)} id=${event.pointer} global=${_fmt(event.position)} local=${_fmt(event.localPosition)}');
     // trackpad 指针从未参与：提前忽略，避免误提交正在画的笔迹
-    if (event.kind == PointerDeviceKind.trackpad) return;
+    if (event.kind == PointerDeviceKind.trackpad) {
+      AppLog.log('ptr', 'UP -> ignored (trackpad)');
+      return;
+    }
     _pointers.remove(event.pointer);
     if (_panPointer == event.pointer) {
       _panPointer = null;
@@ -638,7 +692,12 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
     _current = null;
     _strokeStart = null;
     if (stroke != null && stroke.points.isNotEmpty) {
+      AppLog.log('ptr', 'UP -> stroke commit id=${event.pointer} pts=${stroke.points.length} '
+          'first=${_fmt(Offset(stroke.points.first.x, stroke.points.first.y))} '
+          'last=${_fmt(Offset(stroke.points.last.x, stroke.points.last.y))}');
       widget.session.addStroke(widget.pageIndex, stroke);
+    } else if (stroke != null) {
+      AppLog.log('ptr', 'UP -> stroke empty (dropped) id=${event.pointer}');
     }
     setState(() {});
   }
@@ -661,7 +720,9 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
   /// 滚轮：平移（纵向为主）；Ctrl / ⌘ + 滚轮以光标为中心缩放。
   void _onPointerSignal(PointerSignalEvent event) {
     if (event is! PointerScrollEvent) return;
-    if (HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed) {
+    final ctrl = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
+    AppLog.log('scroll', 'delta=${_fmt(event.scrollDelta)} ctrl=$ctrl pos=${_fmt(event.position)}');
+    if (ctrl) {
       if (event.scrollDelta.dy != 0) {
         final ratio = event.scrollDelta.dy > 0 ? 1 / 1.1 : 1.1;
         widget.onZoom(event.position, ratio);
@@ -686,11 +747,13 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
       onPointerSignal: _onPointerSignal,
       onPointerPanZoomStart: (event) {
         // 触控板双指手势（macOS / Windows）→ 平移 + 缩放
+        AppLog.log('panzoom', 'START id=${event.pointer} pos=${_fmt(event.position)} device=${event.kind}');
         _gestureMid = event.position;
         _panZoomScale = 1;
       },
       onPointerPanZoomUpdate: (event) {
         _gestureMid = _gestureMid ?? event.position;
+        AppLog.log('panzoom', 'UPDATE id=${event.pointer} panDelta=${_fmt(event.panDelta)} scale=${event.scale.toStringAsFixed(3)} pos=${_fmt(event.position)}');
         if (event.panDelta != Offset.zero) {
           widget.onPan(event.panDelta);
         }
@@ -700,7 +763,10 @@ class _NotebookPageViewState extends State<_NotebookPageView> {
           _panZoomScale = event.scale;
         }
       },
-      onPointerPanZoomEnd: (event) => _gestureMid = null,
+      onPointerPanZoomEnd: (event) {
+        AppLog.log('panzoom', 'END id=${event.pointer}');
+        _gestureMid = null;
+      },
       child: CustomPaint(
         painter: _NotebookPaperPainter(template: page.template, pageSize: _pageSize),
         isComplex: true,
@@ -968,6 +1034,96 @@ class _EditorToolbar extends StatelessWidget {
           IconButton(tooltip: '上一页', icon: const Icon(Icons.chevron_left), onPressed: canPrev ? onPrevPage : null),
           IconButton(tooltip: '下一页', icon: const Icon(Icons.chevron_right), onPressed: canNext ? onNextPage : null),
         ],
+      ),
+    );
+  }
+}
+
+
+/// 诊断日志对话框：路径 + 末尾内容 + 复制 / 清空。
+class _AppLogDialog extends StatefulWidget {
+  const _AppLogDialog();
+
+  @override
+  State<_AppLogDialog> createState() => _AppLogDialogState();
+}
+
+class _AppLogDialogState extends State<_AppLogDialog> {
+  Future<String?>? _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = AppLog.readTail(400);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = AppLog.path;
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860, maxHeight: 640),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Text('诊断日志', style: Theme.of(context).textTheme.titleSmall),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () => Clipboard.setData(ClipboardData(text: path ?? '')),
+                    child: const Text('复制路径'),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      final content = await AppLog.readTail(2000);
+                      if (content != null) {
+                        await Clipboard.setData(ClipboardData(text: content));
+                      }
+                    },
+                    child: const Text('复制日志'),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      await AppLog.clear();
+                      setState(() => _future = AppLog.readTail(400));
+                    },
+                    child: const Text('清空'),
+                  ),
+                  IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  path ?? '日志不可用',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+              const Divider(),
+              Flexible(
+                child: FutureBuilder<String?>(
+                  future: _future,
+                  builder: (context, snapshot) {
+                    final content = snapshot.data;
+                    if (content == null) {
+                      return const Text('(空)');
+                    }
+                    return SingleChildScrollView(
+                      child: SelectableText(
+                        content,
+                        style: const TextStyle(fontSize: 11, fontFamily: 'monospace', height: 1.5),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

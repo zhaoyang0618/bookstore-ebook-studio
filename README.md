@@ -228,6 +228,18 @@ App 本地文件、不进数据契约）—— 配置了图书馆就跟着一起
 维护 `TransformationController`，框架层 `Transform` 只做呈现 —— 指针坐标
 由命中测试逆变换回**笔记页坐标**，笔迹按页坐标存储，与缩放无关。
 
+## 诊断日志
+
+手势 / 录制等平台事件路由问题靠日志定位：笔记编辑器 AppBar 右上角的
+**虫子图标**打开「诊断日志」（显示路径、末尾 400 行、一键复制 / 清空）。
+文件在应用文档目录 `logs/app.log`（macOS 沙箱内为
+`~/Library/Containers/com.bookstore.ebookStudio/Data/Documents/logs/`），
+超过 2MB 自动轮转为 `app.1.log`。复现问题 → 打开对话框 → 复制日志发出来。
+
+记录的内容：每个指针事件（设备类型 / id / 全局与页面坐标 / 动作判定）、
+触控板 pan-zoom 序列、滚轮事件、平移缩放矩阵变化、边界钳制调整、
+笔迹提交等。
+
 ## 全屏
 
 - **桌面**（macOS / Windows / Linux）：左侧导航栏底部的全屏按钮，或按
