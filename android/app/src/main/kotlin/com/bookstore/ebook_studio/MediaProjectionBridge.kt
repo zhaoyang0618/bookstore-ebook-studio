@@ -32,9 +32,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
-import android.util.DisplayMetrics
 import android.view.WindowManager
-import android.view.WindowMetrics
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
@@ -116,20 +114,23 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
         activity.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
 
-    /** 先起前台服务（Android 14 要求在 getMediaProjection 之前），再弹系统授权框。 */
+    /**
+     * 先起前台服务（Android 14 要求在 getMediaProjection 之前），再弹系统授权框。
+     *
+     * 只支持 Android 15+：用 MIRROR_MODE_APP_ONLY 只镜像本应用窗口；
+     * 更低版本直接报错（Dart 侧会提前拦截并说明）。
+     */
     private fun launchConsent() {
-        RecordingForegroundService.start(activity)
-        val intent = if (Build.VERSION.SDK_INT >= 35) {
-            // Android 15+：只镜像本应用窗口（不录其它应用 / 桌面）
-            val displayConfig = android.media.projection.DisplayConfig.Builder()
-                .setDisplayMirrorMode(android.media.projection.DisplayMirrorMode.MIRROR_MODE_APP_ONLY)
-                .build()
-            val config = android.media.projection.MediaProjectionConfig.createFromDisplayConfig(displayConfig)
-            projectionManager.createScreenCaptureIntent(config)
-        } else {
-            projectionManager.createScreenCaptureIntent()
+        if (Build.VERSION.SDK_INT < 35) {
+            finishStartWithError("REQUIRES_ANDROID_15", "录制仅支持 Android 15 及以上（只录本应用窗口）")
+            return
         }
-        activity.startActivityForResult(intent, REQUEST_CODE_PROJECTION)
+        RecordingForegroundService.start(activity)
+        val displayConfig = android.media.projection.DisplayConfig.Builder()
+            .setDisplayMirrorMode(android.media.projection.DisplayMirrorMode.MIRROR_MODE_APP_ONLY)
+            .build()
+        val config = android.media.projection.MediaProjectionConfig.createFromDisplayConfig(displayConfig)
+        activity.startActivityForResult(projectionManager.createScreenCaptureIntent(config), REQUEST_CODE_PROJECTION)
     }
 
     private fun startProjection(resultCode: Int, data: Intent) {
@@ -180,28 +181,14 @@ class MediaProjectionBridge(private val activity: Activity) : MethodChannel.Meth
     private class ScreenSize(val width: Int, val height: Int, val densityDpi: Int)
 
     private fun screenSize(): ScreenSize {
+        // 只支持 Android 15+（MIRROR_MODE_APP_ONLY）→ 虚拟屏尺寸取**当前窗口**
+        // 而非整块屏幕；仅保证宽高为偶数（编码器要求）
         val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        if (Build.VERSION.SDK_INT >= 35) {
-            // 仅镜像本应用窗口 → 虚拟屏尺寸应取**当前窗口**（而非整块屏幕）
-            val bounds = wm.currentWindowMetrics.bounds
-            val dm = activity.resources.displayMetrics
-            val w = bounds.width() - (bounds.width() % 2)
-            val h = bounds.height() - (bounds.height() % 2)
-            return ScreenSize(w, h, dm.densityDpi)
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            val bounds: WindowMetrics = wm.maximumWindowMetrics
-            val dm = activity.resources.displayMetrics
-            // 保持设备当前方向，仅保证宽高为偶数（编码器要求）
-            val w = bounds.bounds.width() - (bounds.bounds.width() % 2)
-            val h = bounds.bounds.height() - (bounds.bounds.height() % 2)
-            return ScreenSize(w, h, dm.densityDpi)
-        }
-        @Suppress("DEPRECATION")
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        activity.windowManager.defaultDisplay.getRealMetrics(metrics)
-        return ScreenSize(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+        val bounds = wm.currentWindowMetrics.bounds
+        val dm = activity.resources.displayMetrics
+        val w = bounds.width() - (bounds.width() % 2)
+        val h = bounds.height() - (bounds.height() % 2)
+        return ScreenSize(w, h, dm.densityDpi)
     }
 
     private fun timestampFileName(): String {

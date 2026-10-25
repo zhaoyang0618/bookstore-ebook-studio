@@ -148,11 +148,24 @@ pypdf    → 第 1 页 34 条注释，其中 Ink 2 条
 | 平台 | 范围 | 实现 | 权限 |
 |---|---|---|---|
 | iOS | 仅本应用窗口 | `drawHierarchy` 逐帧渲染自己的视图树 → `AVAssetWriter`（H.264）；麦克风 `AVAudioRecorder` 单独录 m4a，停止后 `AVMutableComposition` passthrough 合成（`ReplayKitBridge.swift`） | 只需麦克风（**不需要**屏幕录制权限） |
-| Android 15+ | 仅本应用窗口 | MediaProjection `MIRROR_MODE_APP_ONLY` + MediaRecorder（`MediaProjectionBridge.kt`） | 系统投屏授权 + 麦克风 |
-| Android 14- | 整个屏幕 | MediaProjection + MediaRecorder + `mediaProjection` 前台服务 | 同上 |
+| Android 15+ | 仅本应用窗口 | MediaProjection `MIRROR_MODE_APP_ONLY` + MediaRecorder（`MediaProjectionBridge.kt`）；**只做 15+** —— 窗口级镜像靠它，低版本直接提示不支持 | 系统投屏授权 + 麦克风 |
 | Windows | 仅本应用窗口 | `PrintWindow(PW_RENDERFULLCONTENT)` 逐帧抓取（Flutter 是 ANGLE/D3D 渲染，必须带此 flag）+ Media Foundation SinkWriter 编码 H.264（`windows/runner/recorder_bridge.cpp`，纯 Win32/COM，不引 C++/WinRT）；v1 暂不含音频 | 无需额外权限 |
 | macOS | 整个屏幕 | `AVCaptureScreenInput` + `AVCaptureMovieFileOutput`（`ScreenRecorderBridge.swift`） | TCC「屏幕录制」（首次弹窗，**授权后需重启应用**）+ TCC「麦克风」 |
 | Linux | 未实现 | 界面直接给出明确提示（规划：PipeWire） | — |
+
+### 视频保存到哪里
+
+- **录制图书馆里的书** → `MyLibrary/books/{书名}/recordings/`，
+  视频 + 同名 JSON 元数据，随图书馆跨设备同步
+- **独立模式（没选书）** → 应用文档目录的 `recordings/`：
+  | 平台 | 路径 |
+  |---|---|
+  | macOS（沙箱） | `~/Library/Containers/com.bookstore.ebookStudio/Data/Documents/recordings/` |
+  | Windows | `C:\Users\{用户}\Documents\recordings\` |
+  | iOS | 应用沙箱 `Documents/recordings/` |
+  | Android | `/data/user/0/com.bookstore.ebook_studio/app_flutter/recordings/` |
+
+  录课页的「录制记录」上方会显示**当前实际**的保存位置。
 
 **为什么 iOS 不用 ReplayKit**：ReplayKit 只有「录整个屏幕」一种（采样缓冲
 模式也一样），系统没有「只录自己窗口」的 API，而且要屏幕录制权限。

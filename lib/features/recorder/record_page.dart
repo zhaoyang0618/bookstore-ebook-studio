@@ -5,9 +5,8 @@
 ///   `macos/Runner/ScreenRecorderBridge.swift`）
 /// - iOS：**仅录本应用窗口** —— `drawHierarchy` 逐帧渲染自己的视图树 +
 ///   `AVAssetWriter`，不需要屏幕录制权限（见 `ios/Runner/ReplayKitBridge.swift`）
-/// - Android：MediaProjection + MediaRecorder；Android 15+ 用
-///   `MIRROR_MODE_APP_ONLY` 只镜像本应用窗口，低版本录整个屏幕
-///   （见 `MediaProjectionBridge.kt`）
+/// - Android：**仅 Android 15+**，MediaProjection `MIRROR_MODE_APP_ONLY`
+///   只镜像本应用窗口 + MediaRecorder（见 `MediaProjectionBridge.kt`）
 /// - Windows：**仅录本应用窗口** —— `PrintWindow` 逐帧抓取 +
 ///   Media Foundation 编码 H.264（见 `windows/runner/recorder_bridge.cpp`；
 ///   v1 暂不含音频）
@@ -62,6 +61,9 @@ class _RecordPageState extends ConsumerState<RecordPage> {
   /// 当前目录下的录课仓库；书 / 目录变化时重建。
   RecordingRepository? _repository;
   String? _repositoryKey;
+
+  /// 保存位置（显示给用户，免得找不到视频）。
+  String? _saveDir;
 
   List<Recording> _recordings = const [];
 
@@ -122,6 +124,7 @@ class _RecordPageState extends ConsumerState<RecordPage> {
     }
     _repository = RecordingRepository(dir);
     _repositoryKey = key;
+    _saveDir = dir;
     return _repository!;
   }
 
@@ -135,6 +138,12 @@ class _RecordPageState extends ConsumerState<RecordPage> {
   /// 点了才开始才失败）。
   String? _unsupportedReason() {
     if (Platform.isLinux) return 'Linux 端录制尚未实现（规划：PipeWire）';
+    if (Platform.isAndroid) {
+      // 只做 Android 15+：MIRROR_MODE_APP_ONLY 才能只录本应用窗口
+      final match = RegExp(r'Android (\d+)').firstMatch(Platform.operatingSystemVersion);
+      final sdk = match != null ? int.tryParse(match.group(1)!) : null;
+      if (sdk != null && sdk < 15) return '录制需要 Android 15 及以上（用于只录本应用窗口）';
+    }
     return null;
   }
 
@@ -142,7 +151,7 @@ class _RecordPageState extends ConsumerState<RecordPage> {
   String get _captureScopeText {
     if (Platform.isIOS || Platform.isWindows) return '仅录制本应用窗口的内容';
     if (Platform.isMacOS) return '录制整个屏幕（阅读器 + 手写标注都会被录进去）';
-    if (Platform.isAndroid) return 'Android 15+ 仅录本应用窗口，更低版本录整个屏幕';
+    if (Platform.isAndroid) return '仅录制本应用窗口的内容';
     return '';
   }
 
@@ -307,6 +316,16 @@ class _RecordPageState extends ConsumerState<RecordPage> {
                 IconButton(tooltip: '刷新', icon: const Icon(Icons.refresh), onPressed: _reloadRecordings),
               ],
             ),
+            if (_saveDir != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '保存位置：$_saveDir',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
             Expanded(child: _RecordingsList(
               recordings: _recordings,
               repository: _repository,
